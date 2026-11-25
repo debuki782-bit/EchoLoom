@@ -1,0 +1,41 @@
+# Conversation-to-Agent configuration template (example IDs).
+# Replace the placeholder wxid_* values with your real account and contact IDs
+# before starting the live runtime; changes require an Agent restart.
+default_profile = "default"
+memory_model = "gpt-6-luna"
+account_daily_budget_usd = "4.00"
+account_text_budget_usd = "2.00"
+account_image_read_budget_usd = "1.00"
+account_image_generation_budget_usd = "1.00"
+command_owner_ids = ["wxid_owner_example"]
+
+[profiles.default]
+model = "gemini-4-hydrogen"
+# Full request tokens, including instructions, SDK history, tools and media.
+# Idle rollover summarizes & rotates when idle >= idle_session_hours and tokens >= idle_compression_tokens.
+input_token_limit = 128000
+# Optional per-profile max output token override; omit to use the model default.
+# output_token_limit = 12000
+idle_compression_tokens = 64000
+active_compression_tokens = 96000
+token_context_limits = true
+idle_session_hours = 8
+max_history_records = 50
+max_history_bytes = 32000
+context_window_bytes = 32000
+persona_prompt = "persona"
+main_prompt = "main_agent"
+toolsets = ["wechat", "cross_session", "web", "project", "status"]
+daily_budget_usd = "4.00"
+text_budget_usd = "2.00"
+image_read_budget_usd = "1.00"
+image_generation_budget_usd = "1.00"
+
+[profiles.custom_contact]
+extends = "default"
+model = "gemini-4-hydrogen"
+
+[[bindings]]
+account_id = "wxid_bot_example"
+conversation_id = "wxid_contact_example"
+profile = "custom_contact"

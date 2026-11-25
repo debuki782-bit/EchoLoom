@@ -1,0 +1,79 @@
+# EchoLoom model catalog, default token limits, thinking presets, and verified USD micro-unit rates
+# (per 1,000,000 tokens). Optional local overrides can be placed in `.local/models.toml`.
+
+[roles]
+default_memory_model = "gpt-6-luna"
+web_model = "gemini-3.8-flash"
+image_description_model = "gemini-4-hydrogen"
+transcribe_model = "gemini-3.5-transcribe"
+image_generation_model = "gpt-image-2.5-flare"
+image_generation_reservation_microusd = 100000
+embedding_model = "text-embedding-3-small"
+embedding_dimensions = 1536
+
+[models."gpt-6-luna"]
+provider = "openai"
+label = "OpenAI GPT-6 Luna"
+input_token_limit = 128000
+output_token_limit = 8000
+input_rate_microusd = 100000
+output_rate_microusd = 500000
+cached_input_rate_microusd = 10000
+cache_write_rate_microusd = 125000
+
+[models."gemini-3.5-flash-lite"]
+provider = "gemini"
+label = "轻量版 Gemini 3.5 Flash Lite"
+input_token_limit = 80000
+output_token_limit = 8000
+input_rate_microusd = 300000
+output_rate_microusd = 2500000
+cached_input_rate_microusd = 30000
+cache_write_rate_microusd = 300000
+
+[models."gemini-3.8-flash"]
+provider = "gemini"
+label = "日常版 Gemini 3.8 Flash"
+input_token_limit = 120000
+output_token_limit = 12000
+thinking_level = "LOW"
+input_rate_microusd = 1500000
+output_rate_microusd = 7500000
+cached_input_rate_microusd = 150000
+cache_write_rate_microusd = 1500000
+
+[[models."gemini-3.8-flash".rate_tiers]]
+until_date = "2026-12-31"
+input_rate_microusd = 750000
+output_rate_microusd = 3750000
+cached_input_rate_microusd = 75000
+cache_write_rate_microusd = 750000
+
+[models."gemini-4-hydrogen"]
+provider = "gemini"
+label = "Gemini 4 Hydrogen"
+input_token_limit = 150000
+output_token_limit = 12000
+thinking_level = "LOW"
+input_rate_microusd = 1500000
+output_rate_microusd = 7500000
+cached_input_rate_microusd = 75000
+cache_write_rate_microusd = 1500000
+
+[models."gemini-4-argon"]
+provider = "gemini"
+label = "Gemini 4 Argon（高性能，临时一小时）"
+input_token_limit = 150000
+output_token_limit = 15000
+temporary_only_max_seconds = 3600
+input_rate_microusd = 4000000
+output_rate_microusd = 20000000
+cached_input_rate_microusd = 200000
+cache_write_rate_microusd = 4000000
+
+[[models."gemini-4-argon".rate_tiers]]
+until_date = "2026-11-30"
+input_rate_microusd = 2000000
+output_rate_microusd = 10000000
+cached_input_rate_microusd = 100000
+cache_write_rate_microusd = 2000000

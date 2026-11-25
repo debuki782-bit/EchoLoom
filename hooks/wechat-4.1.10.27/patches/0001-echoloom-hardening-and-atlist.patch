@@ -1,0 +1,237 @@
+--- a/src/inline_weixin_dll_load.cpp
++++ b/src/inline_weixin_dll_load.cpp
+@@ -5820,7 +5820,7 @@
+     if (!g_httpServer)
+     {
+         g_httpServer = new HttpServer();
+-        g_httpServer->Start("0.0.0.0", g_StartPort);
++        g_httpServer->Start("127.0.0.1", g_StartPort);
+     }
+ 
+     // Load the persisted auto-reply rules/config (autoreply.json next to the
+--- a/src/global.cpp
++++ b/src/global.cpp
+@@ -334,7 +334,7 @@
+ CRITICAL_SECTION g_dbMgrCriticalSection;
+ 
+ volatile bool g_LoginMonitorRunning = true;
+-std::string g_CallBack_Url;
++std::string g_CallBack_Url = "http://127.0.0.1:8080/callback";
+ 
+ std::wstring g_AppDataDir;
+ std::wstring g_DocumentDir;
+--- a/include/wx_send.h
++++ b/include/wx_send.h
+@@ -4,7 +4,8 @@
+ namespace WeixinSend
+ {
+     bool SendImage(const std::string& wxid, const std::string& imgPath);
+-    bool SendText(const std::string& wxidorgid, const std::string& msg);
++    bool SendText(const std::string& wxidorgid, const std::string& msg,
++                  const std::string& atlist = "");
+     bool DecodePic(const std::string& enc_pic_path, const std::string& dec_pic_path,
+                    uint32_t mode = 1, bool wide_path = true);
+ 
+--- a/src/SendTextMsg.cpp
++++ b/src/SendTextMsg.cpp
+@@ -29,6 +29,7 @@
+ 
+             std::string wxidorgid = reqJson.value("wxidorgid", "");
+             std::string msg = reqJson.value("msg", "");
++            std::string atlist = reqJson.value("atlist", "");
+ 
+             res.set_header("Content-Type", "application/json; charset=utf-8");
+             if (!g_IsLogin) {
+@@ -43,8 +44,17 @@
+                 res.set_content(resp.dump(), "application/json; charset=utf-8");
+                 return;
+             }
++            if (!atlist.empty() && (wxidorgid.size() < 9 ||
++                wxidorgid.compare(wxidorgid.size() - 9, 9, "@chatroom") != 0 ||
++                atlist.size() > 4096 || atlist.find('\0') != std::string::npos ||
++                atlist.find("<atuserlist>") == std::string::npos)) {
++                resp["ret"] = -1;
++                resp["msg"] = "atlist requires a group and atuserlist XML";
++                res.set_content(resp.dump(), "application/json; charset=utf-8");
++                return;
++            }
+ 
+-            const bool queued = WeixinSend::SendText(wxidorgid, msg);
++            const bool queued = WeixinSend::SendText(wxidorgid, msg, atlist);
+ 
+             resp["ret"] = queued ? 0 : -3;
+             resp["retmsg"] = queued ? "queued" : "send failed";
+--- a/src/wx_send.cpp
++++ b/src/wx_send.cpp
+@@ -434,7 +434,8 @@
+ 
+ 
+ 
+-    void BuildTextMessage(uint64_t* ptr, const std::string& text, const std::string& wxid)
++    void BuildTextMessage(uint64_t* ptr, const std::string& text, const std::string& wxid,
++                          const std::string& atlist)
+     {
+         uintptr_t base = GetWeixinDllBase();
+ 
+@@ -450,6 +451,7 @@
+ 
+         SetWeixinString(&msg->receiver, wxid);
+         SetWeixinString(&msg->content, text);
++        if (!atlist.empty()) SetWeixinString(&msg->atlist, atlist);
+         msg->msg_len = text.length();
+         msg->type = 1;
+     }
+@@ -498,7 +500,8 @@
+         );
+     }
+ 
+-    bool SendText(const std::string& wxidorgid, const std::string& msg)
++    bool SendText(const std::string& wxidorgid, const std::string& msg,
++                  const std::string& atlist)
+     {
+         if (wxidorgid.empty() || msg.empty() || !GetModuleHandleA("Weixin.dll"))
+             return false;
+@@ -507,7 +510,7 @@
+ 		//不同版本需要调整 msgBuf 大小，过小会导致发送失败，过大会浪费内存 
+         uint64_t* msgBuf = HeapAlloc_mb<uint64_t>(0x768);
+         if (!msgBuf) return false;
+-        BuildTextMessage(msgBuf, msg, wxidorgid);
++        BuildTextMessage(msgBuf, msg, wxidorgid, atlist);
+ 
+         uint64_t* data = HeapAlloc_mb<uint64_t>(0x20);
+         if (!data) return false;
+--- a/launcher/WeChatHookLauncher.cpp
++++ b/launcher/WeChatHookLauncher.cpp
+@@ -1,33 +1,110 @@
+ #include <windows.h>
+ #include <tlhelp32.h>
++#include <winver.h>
+ #include <string>
++#include <vector>
+ 
+-static const wchar_t* EXE = L"C:\\Program Files\\Tencent\\Weixin\\Weixin.exe";
+-static const wchar_t* DLL = L"C:\\Program Files\\Tencent\\Weixin\\version.dll";
++#pragma comment(lib, "Version.lib")
++
++static std::wstring WeixinExePath() {
++  wchar_t envBuf[MAX_PATH]{};
++  DWORD len = GetEnvironmentVariableW(L"ECHOLOOM_WEIXIN_EXE", envBuf, MAX_PATH);
++  if (len > 0 && len < MAX_PATH) return std::wstring(envBuf, len);
++  return L"C:\\Program Files\\Tencent\\Weixin\\Weixin.exe";
++}
++
++static std::wstring DirOf(const std::wstring& full) {
++  const size_t slash = full.find_last_of(L"\\/");
++  if (slash == std::wstring::npos) return L"";
++  return full.substr(0, slash + 1);
++}
++
++static std::wstring DllPath() {
++  wchar_t path[MAX_PATH]{};
++  if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) return L"";
++  const std::wstring dir = DirOf(std::wstring(path));
++  if (dir.empty()) return L"";
++  const std::wstring uniqueDll = dir + L"wx_agent_hook.dll";
++  if (GetFileAttributesW(uniqueDll.c_str()) != INVALID_FILE_ATTRIBUTES) return uniqueDll;
++  return dir + L"version.dll";
++}
++
++static std::wstring EnvOrDefault(const wchar_t* name, const wchar_t* fallback) {
++  wchar_t buf[512]{};
++  DWORD len = GetEnvironmentVariableW(name, buf, 512);
++  if (len > 0 && len < 512) return std::wstring(buf, len);
++  return std::wstring(fallback);
++}
++
+ static HWND g_status;
+ 
++static bool ExactWeixinVersion(const std::wstring& exe, std::wstring& err) {
++  DWORD ignored = 0;
++  const DWORD size = GetFileVersionInfoSizeW(exe.c_str(), &ignored);
++  if (!size) { err = L"Cannot read Weixin.exe version"; return false; }
++  std::vector<BYTE> data(size);
++  if (!GetFileVersionInfoW(exe.c_str(), 0, size, data.data())) {
++    err = L"Cannot read Weixin.exe version"; return false;
++  }
++  VS_FIXEDFILEINFO* info = nullptr;
++  UINT length = 0;
++  if (!VerQueryValueW(data.data(), L"\\", reinterpret_cast<LPVOID*>(&info), &length) ||
++      !info || length < sizeof(VS_FIXEDFILEINFO) || info->dwSignature != 0xFEEF04BD) {
++    err = L"Invalid Weixin.exe version resource"; return false;
++  }
++  if (info->dwProductVersionMS != MAKELONG(1, 4) ||
++      info->dwProductVersionLS != MAKELONG(27, 10)) {
++    err = L"Weixin.exe must be exactly 4.1.10.27"; return false;
++  }
++  return true;
++}
++
+ static bool Inject(DWORD pid, std::wstring& err) {
++  const std::wstring dll = DllPath();
+   HANDLE p=OpenProcess(PROCESS_CREATE_THREAD|PROCESS_QUERY_INFORMATION|PROCESS_VM_OPERATION|PROCESS_VM_WRITE|PROCESS_VM_READ,FALSE,pid);
+   if(!p){err=L"OpenProcess failed "+std::to_wstring(GetLastError());return false;}
+-  SIZE_T n=(wcslen(DLL)+1)*sizeof(wchar_t); void* mem=VirtualAllocEx(p,nullptr,n,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+-  if(!mem||!WriteProcessMemory(p,mem,DLL,n,nullptr)){err=L"WriteProcessMemory failed";CloseHandle(p);return false;}
++  SIZE_T n=(dll.size()+1)*sizeof(wchar_t); void* mem=VirtualAllocEx(p,nullptr,n,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
++  if(!mem||!WriteProcessMemory(p,mem,dll.c_str(),n,nullptr)){err=L"WriteProcessMemory failed";CloseHandle(p);return false;}
+   auto load=(LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW");
+   HANDLE t=CreateRemoteThread(p,nullptr,0,load,mem,0,nullptr); if(!t){err=L"CreateRemoteThread failed "+std::to_wstring(GetLastError());CloseHandle(p);return false;}
+   WaitForSingleObject(t,10000); DWORD code=0; GetExitCodeThread(t,&code); CloseHandle(t); VirtualFreeEx(p,mem,0,MEM_RELEASE); CloseHandle(p);
+   if(!code){err=L"LoadLibraryW failed";return false;} return true;
+ }
+ 
+-static DWORD Existing() {
+-  HANDLE s=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0); if(s==INVALID_HANDLE_VALUE)return 0; PROCESSENTRY32W e{sizeof(e)}; DWORD id=0;
+-  if(Process32FirstW(s,&e)) do { if(!_wcsicmp(e.szExeFile,L"Weixin.exe")){HANDLE p=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,e.th32ProcessID); if(p){wchar_t path[MAX_PATH];DWORD n=MAX_PATH;if(QueryFullProcessImageNameW(p,0,path,&n)&&!_wcsicmp(path,EXE))id=e.th32ProcessID;CloseHandle(p);} } } while(!id&&Process32NextW(s,&e)); CloseHandle(s); return id;
++static DWORD Existing(const std::wstring& exe) {
++  HANDLE s=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0); if(s==INVALID_HANDLE_VALUE)return 0;
++  PROCESSENTRY32W e{sizeof(e)};
++  std::vector<std::pair<DWORD,DWORD>> matches;
++  if(Process32FirstW(s,&e)) do {
++    if(_wcsicmp(e.szExeFile,L"Weixin.exe")) continue;
++    HANDLE p=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,e.th32ProcessID);
++    if(p){wchar_t path[MAX_PATH];DWORD n=MAX_PATH;
++      if(QueryFullProcessImageNameW(p,0,path,&n)&&!_wcsicmp(path,exe.c_str()))
++        matches.emplace_back(e.th32ProcessID,e.th32ParentProcessID);
++      CloseHandle(p);
++    }
++  } while(Process32NextW(s,&e));
++  CloseHandle(s);
++  for(const auto& item:matches){
++    bool parentIsWeixin=false;
++    for(const auto& other:matches) if(item.second==other.first) parentIsWeixin=true;
++    if(!parentIsWeixin) return item.first;
++  }
++  return 0;
+ }
+ 
+ static bool Start(std::wstring& err,DWORD& pid) {
+-  if(GetFileAttributesW(EXE)==INVALID_FILE_ATTRIBUTES){err=L"Weixin.exe not found";return false;}
+-  if(GetFileAttributesW(DLL)==INVALID_FILE_ATTRIBUTES){err=L"version.dll not found";return false;}
+-  pid=Existing(); if(pid)return Inject(pid,err);
+-  STARTUPINFOW si{sizeof(si)}; PROCESS_INFORMATION pi{}; std::wstring cmd=std::wstring(L"\"")+EXE+L"\" StartPort=30001 RecvType=2 CallBackURL=\"http://127.0.0.1:8080/callback\"";
+-  if(!CreateProcessW(EXE,cmd.data(),nullptr,nullptr,FALSE,CREATE_SUSPENDED,nullptr,L"C:\\Program Files\\Tencent\\Weixin",&si,&pi)){err=L"CreateProcess failed "+std::to_wstring(GetLastError());return false;}
++  const std::wstring exe = WeixinExePath();
++  if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES){err=L"Weixin.exe not found";return false;}
++  if(GetFileAttributesW(DllPath().c_str())==INVALID_FILE_ATTRIBUTES){err=L"Hook DLL not found";return false;}
++  if(!ExactWeixinVersion(exe, err)) return false;
++  pid=Existing(exe); if(pid)return Inject(pid,err);
++  const std::wstring port = EnvOrDefault(L"ECHOLOOM_HOOK_PORT", L"30001");
++  const std::wstring cbUrl = EnvOrDefault(L"ECHOLOOM_CALLBACK_URL", L"http://127.0.0.1:8080/callback");
++  const std::wstring workDir = DirOf(exe);
++  STARTUPINFOW si{sizeof(si)}; PROCESS_INFORMATION pi{};
++  std::wstring cmd=L"\""+exe+L"\" StartPort="+port+L" RecvType=2 CallBackURL=\""+cbUrl+L"\"";
++  if(!CreateProcessW(exe.c_str(),cmd.data(),nullptr,nullptr,FALSE,CREATE_SUSPENDED,nullptr,workDir.empty()?nullptr:workDir.c_str(),&si,&pi)){err=L"CreateProcess failed "+std::to_wstring(GetLastError());return false;}
+   pid=pi.dwProcessId; bool ok=Inject(pid,err); if(ok)ResumeThread(pi.hThread);else TerminateProcess(pi.hProcess,1);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);return ok;
+ }
+ 
+@@ -43,8 +120,7 @@
+   if (cmdLine && (wcsstr(cmdLine, L"--start") || wcsstr(cmdLine, L"/start"))) {
+     std::wstring err; DWORD pid = 0;
+     if (Start(err, pid)) return 0;
+-    MessageBoxW(nullptr, (L"WeChat Hook Launcher failed: " + err).c_str(),
+-                L"WeChat Hook Launcher", MB_OK | MB_ICONERROR);
++    OutputDebugStringW((L"WeChat Hook Launcher failed: " + err).c_str());
+     return 1;
+   }
+   WNDCLASSW c{};c.hInstance=h;c.lpfnWndProc=WndProc;c.lpszClassName=L"WeChatHookLauncher";c.hCursor=LoadCursorW(0,IDC_ARROW);RegisterClassW(&c);HWND w=CreateWindowW(c.lpszClassName,L"WeChat Hook Launcher",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU,CW_USEDEFAULT,CW_USEDEFAULT,500,210,0,0,h,0);ShowWindow(w,show);MSG m;while(GetMessageW(&m,0,0,0)>0){TranslateMessage(&m);DispatchMessageW(&m);}return 0;}

@@ -1,0 +1,21 @@
+{
+  "runtime_tail_start": "【本轮动态召回尾块】",
+  "session_context_header": "【当前会话背景】\n",
+  "message_gap": "本讨论串停顿：距最近一条真人消息约 {{minutes}} 分钟。",
+  "today_environment": "【今日运行背景】\n{{daily}}\n包含本地日期、节假日与（如已启用）本地天气信息。天气若未启用或标为不可用，不要猜测。每条消息自身的时间信息优先用于理解该消息发生的时间。",
+  "current_time": "【当前实际时间】{{timestamp}}；时段：{{period}}。消息时间仍表示消息实际发生时间。",
+  "idle_history_header": "账号级空闲活动历史消息（最近 100 条，按聊天分组，组内按时间正序；不属于当前聊天的新消息）：\n",
+  "idle_empty_history": "暂无已归档消息。",
+  "idle_task_header": "空闲任务：\n",
+  "idle_recent_summaries_header": "\n\n【最近空闲活动记录（已直接注入，请直接查看，勿调用 search_user_memory 检索）】\n",
+  "normal_turn_header": "本轮聊天记录：\n",
+  "followup_cancelled": "（此前的定时等待已被这条新消息提前唤醒并取消；如仍需继续等待，可重新安排。）",
+  "length_limit_header": "【长度限制：",
+  "older_messages_omitted": "省略较早消息 {{count}} 条",
+  "long_body_truncated": "过长正文保留末尾",
+  "delivery_failure_header": "\n\n【待处理发送失败提醒】以下状态只在本轮提醒一次，不代表新的用户指令：\n",
+  "scheduled_wakeup": "\n\n【内部定时任务唤醒】这是我此前安排的等待到期（等待期间本聊天没有收到新消息），结合之前的语气和上下文，判断现在是否值得自然跟进。原定待办：{{task}}",
+  "scheduled_wakeup_with_messages": "\n\n【内部定时任务合并唤醒】这是我此前安排的等待到期，上方已一并附上等待期间本聊天新收到的微信消息；结合新消息与原定待办自然判断如何回应。原定待办：{{task}}",
+  "cross_chat_context_intro": "【此时此刻其它聊天串（非本会话）近况】\n以下是最近一小时内其它聊天串的真实消息快照，最多 20 条；已按时间选取并去重，再按来源讨论串聚合；每个讨论串内按时间正序，包含其他成员和 Agent 的消息。它们说明本轮之外的聊天此刻在做什么，可作为理解眼前话题的背景；先看来源和参与者，再判断是否相关。不要把它们说成当前聊天里发生的事，也不要把跨聊背景自动当成可以转述的内容。\n",
+  "no_new_messages": "当前没有新的聊天消息。"
+}

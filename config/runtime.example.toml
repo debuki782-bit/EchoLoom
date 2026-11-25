@@ -1,0 +1,51 @@
+# Centralized local private runtime configuration template.
+# Copy this file to `.local/runtime.toml` (gitignored) — or run
+# `python -m wechat_agent.local_config init` — before starting live services.
+# Never commit real wxid values, city coordinates, secrets, or local binary hashes.
+
+[server]
+ingress_host = "127.0.0.1"
+ingress_port = 8080
+dashboard_host = "127.0.0.1"
+dashboard_port = 8767
+episode_rag_enabled = true
+
+[identity]
+account = "bot_local"
+default_room = "room:general"
+approved_group_conversations = []
+brand_name = "EchoLoom"
+# Extra display-name terms to mask in untrusted user nicknames (for example your bot name).
+extra_sensitive_name_terms = []
+
+[location]
+# Any valid IANA timezone (for example "Asia/Shanghai", "UTC", "America/New_York").
+timezone = "Asia/Shanghai"
+weather_enabled = false
+weather_city = ""
+weather_latitude = 0.0
+weather_longitude = 0.0
+
+[context]
+# Optional persona mood anchors injected when priority senders are present/absent.
+priority_sender_present_anchor = ""
+priority_sender_absent_anchor = ""
+
+[security]
+# Prefer environment variables or the OS credential store for production secrets.
+# Optional shared secret for webhook/source signature or bearer token verification.
+webhook_secret = ""
+
+[wechat_hook]
+# Optional host settings used only when the local WeChat Hook plugin is enabled.
+hook_url = "http://127.0.0.1:30001"
+native_download_url = "http://127.0.0.1:30002"
+event_extension_url = "http://127.0.0.1:30003"
+weixin_exe = ""
+launcher_exe = ""
+launcher_sha256 = ""
+hook_dll = ""
+hook_dll_sha256 = ""
+weixin_version = ""
+native_download_dll = ".runtime/native-image-download/wx_image_download_411027.dll"
+weixin_dll_sha256 = ""

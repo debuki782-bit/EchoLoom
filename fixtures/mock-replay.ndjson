@@ -1,0 +1,5 @@
+{"event_id":"private-1","account_id":"mock-account","conversation_id":"friend","sender_id":"friend","text":"你好"}
+{"event_id":"group-off","account_id":"mock-account","conversation_id":"room","sender_id":"member","text":"/ai off","is_group":true,"group_trust":{"origin_authenticated":true,"sender_native":true,"membership_verified":true,"source_event_id_stable":true}}
+{"event_id":"group-hidden","account_id":"mock-account","conversation_id":"room","sender_id":"friend","text":"暂停期间的消息","is_group":true,"group_trust":{"origin_authenticated":true,"sender_native":true,"membership_verified":true,"source_event_id_stable":true}}
+{"event_id":"group-on","account_id":"mock-account","conversation_id":"room","sender_id":"member","text":"/ai on","is_group":true,"group_trust":{"origin_authenticated":true,"sender_native":true,"membership_verified":true,"source_event_id_stable":true}}
+{"event_id":"group-1","account_id":"mock-account","conversation_id":"room","sender_id":"friend","text":"恢复之后","is_group":true,"group_trust":{"origin_authenticated":true,"sender_native":true,"membership_verified":true,"source_event_id_stable":true}}

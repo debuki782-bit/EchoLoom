@@ -1,0 +1,30 @@
+# Multi-source connector registry template.
+# Copy this file to `.local/sources.toml` (gitignored) to configure one or more
+# inbound/outbound message & event sources concurrently.
+#
+# Each [[sources]] (or [sources.<id>]) entry registers an HTTP ingestion route
+# at `POST /sources/<id>/events` and routes outbound replies back through that source.
+# Legacy `POST /callback` continues routing to `default_source`.
+
+default_source = "webhook"
+
+[sources.webhook]
+enabled = true
+factory = "wechat_agent.connectors.webhook:WebhookConnector"
+channel = "webhook"
+account_id = "bot_local"
+default_conversation_id = "room:general"
+# Leave outbound_url empty for ingest-only mode, or point to an HTTP receiver / bridge.
+outbound_url = ""
+# Optional shared secret checked via `Authorization: Bearer <token>` or HMAC-SHA256.
+auth_token_env = "ECHOLOOM_WEBHOOK_SECRET"
+send_enabled = false
+
+# Example optional WeChat Hook connector (Windows desktop hook plugin):
+# [sources.wechat]
+# enabled = false
+# factory = "wechat_agent.connectors.wechat_hook:WeChatHookConnector"
+# channel = "wechat"
+# base_url = "http://127.0.0.1:30001"
+# native_download_url = "http://127.0.0.1:30002"
+# send_enabled = true

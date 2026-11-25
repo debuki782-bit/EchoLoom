@@ -1,0 +1,21 @@
+{
+  "fixture_kind": "synthetic_values_real_private_callback_shape",
+  "ServerPort": 30001,
+  "msgnumber": 1,
+  "sendorrecv": 2,
+  "selfwxid": "sample_self_alias",
+  "msglist": [
+    {
+      "cmdId": 5,
+      "msgtype": 1,
+      "msgtypename": "text",
+      "fromid": "wxid_sender_example",
+      "toid": "wxid_account_example",
+      "room": "",
+      "sender": "wxid_sender_example",
+      "msg": "你好",
+      "msgsvrid": 0,
+      "time": 123456789
+    }
+  ]
+}
