@@ -17,10 +17,16 @@ from uuid import uuid4
 from . import runtime_contract as types
 from .agent_profiles import LUNA_ACTIVE_COMPRESSION_TOKENS, LUNA_IDLE_COMPRESSION_TOKENS
 from .context import ContextWindow
+from .ports import Clock
 from .prompt_catalog import fill_prompt, load_prompt
 from .runtime_contract import AgentFramework, ModelProviderUnavailable
 from .runtime_contract import RunOptions as RunConfig
 from .runtime_scope import model_usage_scope
+from .session_recycle_policy import (
+    CacheRecycleRule,
+    evaluate_cache_recycle,
+    resolve_cache_recycle_rule,
+)
 from .usage import (
     DAILY_ACCOUNT_BUDGET_MICROUSD,
     IMAGE_GENERATION_DAILY_BUDGET_MICROUSD,
@@ -180,6 +186,18 @@ def events_as_records(session: object) -> list[str]:
     return records
 
 
+def _parse_utc(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def count_effective_messages(
     fn: Callable[..., int] | None,
     account_id: str,
@@ -257,6 +275,10 @@ class SessionRolloverPolicy:
         profile_image_generation_budget_microusd: int = IMAGE_GENERATION_DAILY_BUDGET_MICROUSD,
         profile_for_conversation: Callable[[str, str], str] | None = None,
         dedupe: CrossChatDedupeStore | None = None,
+        cache_tier: str | None = None,
+        cache_recycle_idle_seconds: int | None = None,
+        cache_recycle_min_tokens: int | None = None,
+        clock: Clock | None = None,
     ) -> None:
         if (
             idle_session_hours < 1
@@ -311,8 +333,23 @@ class SessionRolloverPolicy:
         self.profile_image_generation_budget_microusd = profile_image_generation_budget_microusd
         self.profile_for_conversation = profile_for_conversation
         self.dedupe = dedupe
+        self.clock = clock
+        self.cache_recycle_rule: CacheRecycleRule | None = resolve_cache_recycle_rule(
+            cache_tier=cache_tier,
+            idle_seconds=cache_recycle_idle_seconds,
+            min_context_tokens=cache_recycle_min_tokens,
+        )
         if self.routing_db is not None:
             self._ensure_schema(self.routing_db)
+
+    def _now(self, now: datetime | None = None) -> datetime:
+        if now is not None:
+            return (now if now.tzinfo is not None else now.replace(tzinfo=UTC)).astimezone(UTC)
+        if self.clock is not None:
+            parsed = _parse_utc(self.clock.now())
+            if parsed is not None:
+                return parsed
+        return datetime.now(UTC)
 
     @staticmethod
     def _ensure_schema(db: sqlite3.Connection) -> None:
@@ -446,7 +483,7 @@ class SessionRolloverPolicy:
         state = self.route_state(route)
         state["account_id"] = account_id
         state["conversation_id"] = conversation_id
-        state["last_message_at"] = (now or datetime.now(UTC)).isoformat()
+        state["last_message_at"] = self._now(now).isoformat()
         self.save_route_state(route, state)
 
     def register_route(self, route: str, account_id: str, conversation_id: str) -> None:
@@ -456,17 +493,10 @@ class SessionRolloverPolicy:
         self.save_route_state(route, state)
 
     def is_idle_time(self, last_message_at: object, *, now: datetime | None = None) -> bool:
-        if not isinstance(last_message_at, str) or not last_message_at:
+        last = _parse_utc(last_message_at)
+        if last is None:
             return False
-        try:
-            last = datetime.fromisoformat(last_message_at)
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=UTC)
-        except ValueError:
-            return False
-        return (now or datetime.now(UTC)) - last.astimezone(UTC) >= timedelta(
-            hours=self.idle_session_hours
-        )
+        return self._now(now) - last >= timedelta(hours=self.idle_session_hours)
 
     def should_rollover_on_idle(
         self,
@@ -505,6 +535,7 @@ class SessionRolloverPolicy:
         *,
         count_tokens: Callable[[str, ContextWindow], Awaitable[int | None]] | None = None,
         summarize_fn: Callable[..., object] | None = None,
+        now: datetime | None = None,
     ) -> PreparedSession:
         assert self.sessions is not None
         user_id, base_session_id = session_keys(window.account_id, window.conversation_id)
@@ -522,9 +553,15 @@ class SessionRolloverPolicy:
             user_id=user_id,
             session_id=session_id,
         )
-        now = datetime.now(UTC)
+        current_now = self._now(now)
         last_message_at = state.get("last_message_at")
-        idle = self.is_idle_time(last_message_at, now=now)
+        last_dt = _parse_utc(last_message_at)
+        idle = self.is_idle_time(last_message_at, now=current_now)
+        idle_seconds = (
+            max(0.0, (current_now - last_dt).total_seconds())
+            if last_dt is not None
+            else 0.0
+        )
         session_events = live_session_events(session.events) if session is not None else []
         session_bytes = sum(estimated_event_bytes(event) for event in session_events)
         incoming_bytes = sum(
@@ -578,29 +615,44 @@ class SessionRolloverPolicy:
             context_tokens=context_tokens,
             total_bytes=session_bytes + incoming_bytes,
         )
-        if session is not None and ((idle and maintenance_ready) or hard_limit):
-            if idle or hard_limit:
-                summary = await self.summarize_session_with_retries(
-                    session,
-                    user_id,
-                    reason=(
-                        "active_context_threshold" if hard_limit else "eight_hour_idle_rollover"
-                    ),
-                    summarize_fn=summarize_fn,
-                )
-                state["latest_summary"] = summary
-            idle_hours = 0
-            if idle and isinstance(last_message_at, str):
-                last_dt = datetime.fromisoformat(last_message_at)
-                if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=UTC)
-                idle_hours = int((now - last_dt.astimezone(UTC)).total_seconds() // 3600)
+        cache_decision = evaluate_cache_recycle(
+            idle_seconds=idle_seconds if last_dt is not None else 0.0,
+            context_tokens=context_tokens,
+            session_bytes=session_bytes,
+            token_context_limits=self.token_context_limits,
+            rule=(
+                self.cache_recycle_rule
+                if session is not None and session_events and last_dt is not None
+                else None
+            ),
+        )
+        if session is not None and (
+            (idle and maintenance_ready) or hard_limit or cache_decision.recycle
+        ):
+            summary_reason = (
+                "active_context_threshold"
+                if hard_limit
+                else ("eight_hour_idle_rollover" if (idle and maintenance_ready) else cache_decision.reason)
+            )
+            log_reason = (
+                "active_context_threshold"
+                if hard_limit
+                else ("eight_hour_threshold" if (idle and maintenance_ready) else cache_decision.reason)
+            )
+            summary = await self.summarize_session_with_retries(
+                session,
+                user_id,
+                reason=summary_reason,
+                summarize_fn=summarize_fn,
+            )
+            state["latest_summary"] = summary
+            idle_hours = int(idle_seconds // 3600) if last_dt is not None else 0
             logger.info(
                 "event=session_rotated route=%s old_generation=%s reason=%s "
                 "message_count=%s event_bytes=%s incoming_bytes=%s idle_hours=%s context_tokens=%s",
                 route[:12],
                 generation,
-                "active_context_threshold" if hard_limit else "eight_hour_threshold",
+                log_reason,
                 message_count,
                 session_bytes,
                 incoming_bytes,
@@ -680,9 +732,26 @@ class SessionRolloverPolicy:
         after_run: object,
         safety_block_code: str | None,
         summarize_fn: Callable[..., object] | None = None,
+        freshness_held: bool = False,
+        now: datetime | None = None,
     ) -> int:
         state = prepared.state
         generation = prepared.generation
+        if freshness_held and safety_block_code is None:
+            if prepared.new_session and self.sessions is not None:
+                try:
+                    await self.sessions.delete_session(
+                        app_name="wechat_agent_mock",
+                        user_id=prepared.user_id,
+                        session_id=prepared.session_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - best-effort cleanup
+                    logger.debug(
+                        "event=held_session_cleanup_failed route=%s error_type=%s",
+                        prepared.route[:12],
+                        type(exc).__name__,
+                    )
+            return generation
         if safety_block_code is not None:
             summary: str | None = None
             if after_run is not None:
@@ -731,7 +800,7 @@ class SessionRolloverPolicy:
             state["summary_only_generation"] = None
         state["generation"] = generation
         state["last_message_at"] = (
-            None if safety_block_code is not None else datetime.now(UTC).isoformat()
+            None if safety_block_code is not None else self._now(now).isoformat()
         )
         self.save_route_state(prepared.route, state)
         return generation
@@ -741,12 +810,13 @@ class SessionRolloverPolicy:
         *,
         count_tokens: Callable[..., Awaitable[int | None]] | None = None,
         summarize_fn: Callable[..., object] | None = None,
+        now: datetime | None = None,
     ) -> int:
         """Summarize each idle session once, including after service downtime."""
         assert self.sessions is not None
         summarized = 0
         routes = self.list_active_routes()
-        now = datetime.now(UTC)
+        current_now = self._now(now)
         for route, state in routes:
             last_value = state.get("last_message_at")
             account_id = state.get("account_id")
@@ -764,12 +834,16 @@ class SessionRolloverPolicy:
                 and self.profile_for_conversation(account_id, conversation_id) != self.profile_id
             ):
                 continue
-            try:
-                last = datetime.fromisoformat(last_value)
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=UTC)
-            except ValueError:
+            last = _parse_utc(last_value)
+            if last is None:
                 continue
+            idle_seconds = max(0.0, (current_now - last).total_seconds())
+            cache_rule = self.cache_recycle_rule
+            cache_window_elapsed = (
+                cache_rule is not None
+                and cache_rule.idle_seconds is not None
+                and idle_seconds > cache_rule.idle_seconds
+            )
             user_id, base_session_id = session_keys(account_id, conversation_id)
             generation = int(state["generation"])
             session_id = window_session_id(base_session_id, generation)
@@ -805,8 +879,8 @@ class SessionRolloverPolicy:
                     and human_age_minutes >= self.idle_session_hours * 60
                 )
             else:
-                idle = now - last.astimezone(UTC) >= timedelta(hours=self.idle_session_hours)
-            if not idle:
+                idle = current_now - last >= timedelta(hours=self.idle_session_hours)
+            if not (idle or cache_window_elapsed):
                 continue
             context_tokens = None
             if self.token_context_limits and count_tokens is not None:
@@ -821,13 +895,21 @@ class SessionRolloverPolicy:
                         type(exc).__name__,
                     )
                     continue
-            high_context = self.should_rollover_on_idle(
+            high_context = idle and self.should_rollover_on_idle(
                 context_tokens=context_tokens,
                 message_count=user_message_count,
                 total_bytes=event_bytes,
             )
-            if not high_context:
+            cache_decision = evaluate_cache_recycle(
+                idle_seconds=idle_seconds,
+                context_tokens=context_tokens,
+                session_bytes=event_bytes,
+                token_context_limits=self.token_context_limits,
+                rule=cache_rule,
+            )
+            if not (high_context or cache_decision.recycle):
                 continue
+            reason = "eight_hour_idle" if high_context else cache_decision.reason
             with model_usage_scope(
                 account_id,
                 conversation_id,
@@ -840,7 +922,7 @@ class SessionRolloverPolicy:
                 summary = await self.summarize_session_with_retries(
                     session,
                     user_id,
-                    reason="eight_hour_idle",
+                    reason=reason,
                     summarize_fn=summarize_fn,
                 )
             state["latest_summary"] = summary
@@ -855,8 +937,8 @@ class SessionRolloverPolicy:
                 "idle_hours=%s message_count=%s event_bytes=%s context_tokens=%s",
                 route[:12],
                 generation,
-                "eight_hour_idle_and_threshold",
-                int((now - last.astimezone(UTC)).total_seconds() // 3600),
+                "eight_hour_idle_and_threshold" if high_context else cache_decision.reason,
+                int(idle_seconds // 3600),
                 user_message_count,
                 event_bytes,
                 context_tokens,

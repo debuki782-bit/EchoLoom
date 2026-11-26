@@ -1,5 +1,7 @@
 # EchoLoom model catalog, default token limits, thinking presets, and verified USD micro-unit rates
 # (per 1,000,000 tokens). Optional local overrides can be placed in `.local/models.toml`.
+# Optional per-model prompt-cache recycle settings: `cache_tier` ("long_cache_1h" / "short_cache_5m"),
+# `cache_recycle_idle_seconds`, and `cache_recycle_min_tokens`.
 
 [roles]
 default_memory_model = "gpt-6-luna"

@@ -18,6 +18,7 @@ from .context import ContextWindow
 from .cross_chat_dedupe import CrossChatDedupeStore
 from .episode_memory import EpisodeMemory, recall_turn
 from .jev_strategy import JevStrategyClassifier
+from .ports import Clock
 from .prompt_catalog import fill_runtime, load_prompt, runtime_templates
 from .runtime_contract import AgentFramework, AgentTool, ModelProviderUnavailable
 from .runtime_contract import RunOptions as RunConfig
@@ -60,6 +61,11 @@ from .turn_hooks import (
     TurnState,
     _render_request_contents,
     _safe_trace_value,
+)
+from .turn_scope import (
+    check_outbound_freshness,
+    is_turn_freshness_held,
+    mark_turn_freshness_held,
 )
 from .usage import (
     DAILY_ACCOUNT_BUDGET_MICROUSD,
@@ -259,6 +265,10 @@ class ScopedAgentRuntime:
         profile_image_generation_budget_microusd: int = IMAGE_GENERATION_DAILY_BUDGET_MICROUSD,
         profile_for_conversation: Callable[[str, str], str] | None = None,
         turn_hooks: Sequence[TurnHook] | None = None,
+        cache_tier: str | None = None,
+        cache_recycle_idle_seconds: int | None = None,
+        cache_recycle_min_tokens: int | None = None,
+        clock: Clock | None = None,
     ) -> None:
         if (
             idle_session_hours < 1
@@ -347,6 +357,10 @@ class ScopedAgentRuntime:
             profile_image_generation_budget_microusd=profile_image_generation_budget_microusd,
             profile_for_conversation=profile_for_conversation,
             dedupe=self.dedupe,
+            cache_tier=cache_tier,
+            cache_recycle_idle_seconds=cache_recycle_idle_seconds,
+            cache_recycle_min_tokens=cache_recycle_min_tokens,
+            clock=clock,
         )
         resolved_trace_dir = trace_directory or (
             database_path.parent / "session-traces" if database_path is not None else None
@@ -776,6 +790,7 @@ class ScopedAgentRuntime:
         message = types.Content(role="user", parts=[types.Part.from_text(text=content)])
         final = ""
         after_run = None
+        last_invocation_id: str | None = None
         state_token = _active_turn_state.set(state)
         hooks_token = _active_turn_hooks.set(self.turn_hooks)
         try:
@@ -787,12 +802,30 @@ class ScopedAgentRuntime:
                     max_llm_calls=max_llm_calls, show_call_budget=window.is_idle_event
                 ),
             ):
+                inv = getattr(event, "invocation_id", None)
+                if isinstance(inv, str) and inv:
+                    last_invocation_id = inv
                 if event.is_final_response() and event.content:
                     final = "".join(
                         part.text or ""
                         for part in event.content.parts or []
                         if not getattr(part, "thought", False)
                     )
+            if final.strip() and not is_turn_freshness_held():
+                decision = check_outbound_freshness()
+                if decision is not None and decision.kind == "hold":
+                    mark_turn_freshness_held()
+                    final = ""
+                    rewind_fn = getattr(runner, "rewind_invocation", None)
+                    if callable(rewind_fn) and last_invocation_id is not None:
+                        await rewind_fn(
+                            user_id=prepared.user_id,
+                            session_id=prepared.session_id,
+                            invocation_id=last_invocation_id,
+                        )
+            if is_turn_freshness_held():
+                state.freshness_held = True
+                final = ""
         except ModelProviderUnavailable as exc:
             state.provider_unavailable = True
             state.run_error = type(exc).__name__
@@ -803,7 +836,7 @@ class ScopedAgentRuntime:
         finally:
             _active_turn_hooks.reset(hooks_token)
             _active_turn_state.reset(state_token)
-            if not state.provider_unavailable:
+            if not state.provider_unavailable and not state.freshness_held:
                 # Commit cross-chat dedupe once the request may have reached the provider;
                 # pre-dispatch outages retry cleanly without losing unseen cross-chat rows.
                 self.dedupe.mark_seen(prepared.route, prepared.generation, seen_ids)
@@ -819,6 +852,7 @@ class ScopedAgentRuntime:
             after_run=after_run,
             safety_block_code=state.safety_block_code,
             summarize_fn=self._summarize_session,
+            freshness_held=state.freshness_held,
         )
         logger.info(
             "event=adk_turn_finished route=%s generation=%s has_reply=%s elapsed_ms=%s",

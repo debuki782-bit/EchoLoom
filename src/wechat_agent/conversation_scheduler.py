@@ -8,11 +8,12 @@ import logging
 import math
 import os
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from .freshness_policy import PendingInboundSnapshot
 from .usage import DAILY_BUDGET_TIMEZONE
 from .wechat_gateway import MessageEvent
 
@@ -311,6 +312,72 @@ class ConversationScheduler:
             ).fetchone()
             is not None
         )
+
+    @staticmethod
+    def _freshness_hold_count(last_error: object) -> int:
+        if not isinstance(last_error, str):
+            return 0
+        if last_error == "freshness_held":
+            return 1
+        if last_error.startswith("freshness_held:"):
+            suffix = last_error.split(":", 1)[1]
+            return int(suffix) if suffix.isdigit() else 1
+        return 0
+
+    def batch_freshness_holds(self, batch: MessageBatch) -> int:
+        """Return the highest prior freshness-hold count recorded on receipts in this batch."""
+        if not batch.receipt_ids:
+            return 0
+        placeholders = ",".join("?" for _ in batch.receipt_ids)
+        rows = self.db.execute(
+            f"SELECT last_error FROM pilot_inbox WHERE receipt_id IN ({placeholders})",
+            batch.receipt_ids,
+        ).fetchall()
+        return max((self._freshness_hold_count(row["last_error"]) for row in rows), default=0)
+
+    def pending_inbound_snapshots(
+        self,
+        account_id: str,
+        conversation_id: str,
+        *,
+        exclude_receipt_ids: Sequence[str] = (),
+    ) -> tuple[PendingInboundSnapshot, ...]:
+        """Return ordered pending inbox snapshots for pre-send freshness checks."""
+        excluded = set(exclude_receipt_ids)
+        rows = self.db.execute(
+            "SELECT receipt_id,sender_id,payload_json,received_at,last_error "
+            "FROM pilot_inbox "
+            "WHERE state='pending' AND account_id=? AND conversation_id=? "
+            "ORDER BY rowid",
+            (account_id, conversation_id),
+        ).fetchall()
+        snapshots: list[PendingInboundSnapshot] = []
+        for row in rows:
+            receipt_id = str(row["receipt_id"])
+            if receipt_id in excluded:
+                continue
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError:
+                payload = {}
+            raw_source_id = payload.get("source_msg_id")
+            source_msg_id = (
+                raw_source_id
+                if isinstance(raw_source_id, int) and not isinstance(raw_source_id, bool)
+                else None
+            )
+            snapshots.append(
+                PendingInboundSnapshot(
+                    receipt_id=receipt_id,
+                    sender_id=str(row["sender_id"]),
+                    text=str(payload.get("text") or ""),
+                    is_group=bool(payload.get("is_group")),
+                    received_at=str(row["received_at"]),
+                    source_msg_id=source_msg_id,
+                    last_error=str(row["last_error"]) if row["last_error"] is not None else None,
+                )
+            )
+        return tuple(snapshots)
 
     def receipt_state(self, item: MessageEvent) -> str | None:
         row = self.db.execute(

@@ -8,7 +8,13 @@ from ..outbound import OutboundService, _segment_pause_seconds
 from ..runtime_contract import AgentTool as ToolUnion
 from ..runtime_contract import ToolContext
 from ..tool_timing import agent_function_tool
-from ..turn_scope import followup_scheduler, memory_context, operation_id
+from ..turn_scope import (
+    check_outbound_freshness,
+    followup_scheduler,
+    mark_turn_freshness_held,
+    memory_context,
+    operation_id,
+)
 from .memory import MemoryToolset
 
 
@@ -91,6 +97,40 @@ class ReplyToolset:
         image_notes: list[dict[str, str]] | None = None,
         tool_context: ToolContext | None = None,
     ) -> dict[str, object]:
+        segments: list[str] = []
+        primary = reply_text.strip() if isinstance(reply_text, str) else ""
+        if primary:
+            segments.append(primary)
+        if isinstance(reply_messages, list):
+            for item in reply_messages:
+                if isinstance(item, str):
+                    cleaned = item.strip()
+                    if cleaned and (not segments or cleaned != segments[0]):
+                        segments.append(cleaned)
+        segments = segments[:5]
+        image_id = reply_image_id.strip() if isinstance(reply_image_id, str) else ""
+        image_pos = (
+            reply_image_position.strip().casefold()
+            if isinstance(reply_image_position, str)
+            else "after"
+        )
+        if image_pos not in ("after", "before"):
+            image_pos = "after"
+
+        if (segments or image_id) and not self.outbound.is_send_blocked():
+            decision = check_outbound_freshness()
+            if decision is not None and decision.kind == "hold":
+                mark_turn_freshness_held()
+                if tool_context is not None:
+                    tool_context.end_turn()
+                return {
+                    "status": "held",
+                    "delivered": False,
+                    "reason": decision.reason,
+                    "conflict_count": len(decision.conflicts),
+                    "reply": {"status": "held", "delivered": False},
+                }
+
         results: dict[str, object] = {}
         memory_tools = self.memory_tools
         if message_notes:
@@ -157,26 +197,6 @@ class ReplyToolset:
                 event_updates,
                 lambda: memory_tools.apply_event_updates(event_updates),
             )
-
-        segments: list[str] = []
-        primary = reply_text.strip() if isinstance(reply_text, str) else ""
-        if primary:
-            segments.append(primary)
-        if isinstance(reply_messages, list):
-            for item in reply_messages:
-                if isinstance(item, str):
-                    cleaned = item.strip()
-                    if cleaned and (not segments or cleaned != segments[0]):
-                        segments.append(cleaned)
-        segments = segments[:5]
-        image_id = reply_image_id.strip() if isinstance(reply_image_id, str) else ""
-        image_pos = (
-            reply_image_position.strip().casefold()
-            if isinstance(reply_image_position, str)
-            else "after"
-        )
-        if image_pos not in ("after", "before"):
-            image_pos = "after"
 
         async def _send_text_part(*, record_delivery: bool) -> dict[str, object]:
             if len(segments) == 1:

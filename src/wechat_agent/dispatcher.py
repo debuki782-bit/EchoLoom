@@ -19,6 +19,7 @@ from .context import ContextWindow, fit_context_window
 from .context_assembler import AssembledBatch, MessageContextAssembler
 from .context_builder import ContextBuilder, ContextSpec
 from .conversation_scheduler import ConversationScheduler, MessageBatch
+from .freshness_policy import FreshnessDecision, evaluate_outbound_freshness
 from .ingress import sha
 from .media import WeChatImageIngestor, WeChatVoiceIngestor
 from .memory_store import MemoryStore
@@ -248,6 +249,8 @@ class Dispatcher:
         worker_id: str = "default",
         heartbeat_interval_seconds: float = 2.0,
         process_timeout_seconds: float = PROCESS_TIMEOUT_SECONDS,
+        max_freshness_holds: int = 1,
+        account_aliases_provider: Callable[[str], Sequence[str]] | None = None,
     ) -> None:
         self.db = db
         self.scheduler = scheduler
@@ -307,7 +310,33 @@ class Dispatcher:
         self.worker_id = worker_id
         self.heartbeat_interval_seconds = float(heartbeat_interval_seconds)
         self.process_timeout_seconds = float(process_timeout_seconds)
+        self.max_freshness_holds = max(0, int(max_freshness_holds))
+        self.account_aliases_provider = account_aliases_provider
         self._in_flight: dict[str, object] | None = None
+
+    def _account_aliases(self, account_id: str, context: ContextWindow) -> tuple[str, ...]:
+        aliases: list[str] = []
+        if self.account_aliases_provider is not None:
+            aliases.extend(
+                alias.strip()
+                for alias in self.account_aliases_provider(account_id)
+                if isinstance(alias, str) and alias.strip()
+            )
+        identity = context.identities.get(account_id)
+        if identity is not None:
+            for field_val in (identity.display_name, identity.nickname, identity.remark):
+                if isinstance(field_val, str) and field_val.strip():
+                    aliases.append(field_val.strip())
+        return tuple(dict.fromkeys(aliases))
+
+    def _batch_has_side_effect(self, batch: MessageBatch) -> bool:
+        batch_receipt = hashlib.sha256(f"batch\0{batch.batch_id}".encode()).hexdigest()
+        delivery = self.current_delivery_state(batch_receipt)
+        return (
+            int(delivery.get("send_attempt_count", 0) or 0) > 0
+            or delivery.get("last_send_status")
+            in ("queued", "accepted_by_server", "unknown")
+        )
 
     @property
     def provider_ready(self) -> bool:
@@ -671,6 +700,31 @@ class Dispatcher:
                 if self.followup_factory is not None
                 else None
             )
+            held_flag = [False]
+            freshness_fn: Callable[[], FreshnessDecision] | None = None
+            if batch is not None and self.max_freshness_holds > 0:
+                active_batch = batch
+                prior_holds = self.scheduler.batch_freshness_holds(active_batch)
+                batch_senders = tuple(obs.sender_id for obs in active_batch.observations)
+                account_aliases = self._account_aliases(item.account_id, context)
+
+                def _check_batch_freshness() -> FreshnessDecision:
+                    pending = self.scheduler.pending_inbound_snapshots(
+                        item.account_id,
+                        item.conversation_id,
+                        exclude_receipt_ids=active_batch.receipt_ids,
+                    )
+                    return evaluate_outbound_freshness(
+                        account_id=item.account_id,
+                        is_group=context.is_group,
+                        batch_sender_ids=batch_senders,
+                        pending_inbound=pending,
+                        prior_holds=prior_holds,
+                        max_holds=self.max_freshness_holds,
+                        account_aliases=account_aliases,
+                    )
+
+                freshness_fn = _check_batch_freshness
             turn_scope.enter_context(
                 tool_turn_scope(
                     context,
@@ -678,6 +732,8 @@ class Dispatcher:
                     receipt_ids=batch.receipt_ids if batch is not None else (),
                     quote=quote_source,
                     schedule=schedule_fn,
+                    freshness=freshness_fn,
+                    freshness_held=held_flag,
                 )
             )
             pending_notices = self._pending_notices()
@@ -708,6 +764,23 @@ class Dispatcher:
                 if command_reply is not None
                 else await self.reply_logged(context, receipt, "initial")
             )
+            scheduled_followup = bool(
+                self.is_followup_scheduled is not None
+                and self.is_followup_scheduled(item.account_id, item.conversation_id)
+            )
+            if (
+                not held_flag[0]
+                and command_reply is None
+                and text
+                and not scheduled_followup
+                and not self._is_paused()
+                and freshness_fn is not None
+                and freshness_fn().kind == "hold"
+            ):
+                held_flag[0] = True
+            if held_flag[0]:
+                state = "freshness_held"
+                return state
             if batch is not None:
                 scheduler = _batch_scheduler.get() or self.scheduler
                 if not scheduler.mark_model_seen(batch):
@@ -720,10 +793,6 @@ class Dispatcher:
                 self.clear_cancelled_followup(
                     item.account_id, item.conversation_id, cancelled_followup_notice,
                 )
-            scheduled_followup = bool(
-                self.is_followup_scheduled is not None
-                and self.is_followup_scheduled(item.account_id, item.conversation_id)
-            )
             if scheduled_followup:
                 text = ""
             self._acknowledge_notices(tuple(str(row["scope"]) for row in pending_notices))
@@ -826,6 +895,20 @@ class Dispatcher:
                 self.process_single(synthetic),
                 timeout=self.process_timeout_seconds,
             )
+            if process_state == "freshness_held" and not self._batch_has_side_effect(batch):
+                hold_count = self.scheduler.batch_freshness_holds(batch) + 1
+                self.scheduler.defer_batch(
+                    batch,
+                    f"freshness_held:{hold_count}",
+                    delay_seconds=0.0,
+                )
+                deferred = True
+                logger.info(
+                    "event=worker_batch_freshness_held batch=%s size=%s hold_count=%s",
+                    batch.batch_id[:12],
+                    len(batch.observations),
+                    hold_count,
+                )
             if process_state not in ("paused", "outside_test_scope", "test_limit"):
                 self.mark_provider_healthy(source="worker_turn")
         except TimeoutError:
@@ -854,14 +937,7 @@ class Dispatcher:
                 batch.batch_id[:12],
             )
         except ModelProviderUnavailable:
-            batch_receipt = hashlib.sha256(f"batch\0{batch.batch_id}".encode()).hexdigest()
-            delivery = self.current_delivery_state(batch_receipt)
-            has_side_effect = (
-                int(delivery.get("send_attempt_count", 0) or 0) > 0
-                or delivery.get("last_send_status")
-                in ("queued", "accepted_by_server", "unknown")
-            )
-            if not has_side_effect:
+            if not self._batch_has_side_effect(batch):
                 delay = self.trip_provider_circuit("worker_turn_unavailable")
                 self.scheduler.defer_batch(
                     batch, "provider_unavailable", delay_seconds=delay,

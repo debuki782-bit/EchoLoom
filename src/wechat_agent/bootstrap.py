@@ -1,7 +1,7 @@
 """Composition root for the WeChat AI Agent runtime, worker, and standalone Ingress.
 
 Top-level imports are intentionally free of LLM SDKs (``google.adk``, ``google.genai``,
-``openai``, ``agents``, ``episode_memory``, ``session_runtime``) so Scheme A standalone
+``openai``, ``episode_memory``, ``session_runtime``) so Scheme A standalone
 Ingress (``scripts/run-ingress.py`` and ``--role ingress``) stays zero-LLM-import clean.
 """
 
@@ -762,6 +762,7 @@ def build_runners(
     from .prompt_catalog import refresh_prompts
 
     workspace = Path(root)
+    catalog = load_model_catalog(workspace=workspace)
     runtime_cls = _resolve("ScopedAgentRuntime")
     default_profile = profile_config.profiles[profile_config.default_profile]
     runner_cache: dict[tuple[str, str], Any] = {}
@@ -786,6 +787,20 @@ def build_runners(
         profile_model = providers.make_adk_model(selected)
         profile_summary_model = providers.make_adk_model(
             replace(selected, model_id=profile_config.memory_model_id),
+        )
+        model_spec = catalog.get(selected.model_id)
+        effective_cache_tier = selected.cache_tier or (
+            model_spec.cache_tier if model_spec is not None else None
+        )
+        effective_cache_idle = (
+            selected.cache_recycle_idle_seconds
+            if selected.cache_recycle_idle_seconds is not None
+            else (model_spec.cache_recycle_idle_seconds if model_spec is not None else None)
+        )
+        effective_cache_min_tokens = (
+            selected.cache_recycle_min_tokens
+            if selected.cache_recycle_min_tokens is not None
+            else (model_spec.cache_recycle_min_tokens if model_spec is not None else None)
         )
         extra_tools = services.profile_tools(profile, profile_model)
         runner = runtime_cls(
@@ -827,6 +842,10 @@ def build_runners(
                     conversation_id,
                 ).profile_id
             ),
+            cache_tier=effective_cache_tier,
+            cache_recycle_idle_seconds=effective_cache_idle,
+            cache_recycle_min_tokens=effective_cache_min_tokens,
+            clock=providers.clock,
         )
         runner_cache[cache_key] = runner
         logger.info(
@@ -955,6 +974,7 @@ def build_ingress_app(
             ConversationKey(route.account, group) for group in route.approved_rooms
         ),
         send_enabled=False,
+        active_account_provider=lambda: route.account,
     )
     gateway = registry.as_gateway()
 
@@ -1068,6 +1088,7 @@ def build_runtime_bundle(
             ConversationKey(account, group) for group in route.approved_rooms
         ),
         send_enabled=True,
+        active_account_provider=lambda: account,
     )
     gateway = registry.as_gateway()
     factory = registry.default().factory

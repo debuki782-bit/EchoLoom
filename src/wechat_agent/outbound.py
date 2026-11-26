@@ -21,6 +21,8 @@ from .context import ContextWindow
 from .models import ConversationKey, ReplyDraft
 from .turn_scope import (
     active_conversation,
+    check_outbound_freshness,
+    mark_turn_freshness_held,
     operation_id,
     operation_receipt_ids,
     quote_context,
@@ -982,6 +984,16 @@ class OutboundService:
                 return "retry_limit_reached"
             if not self.can_send():
                 return "send_blocked"
+            if send_attempts == 0 and not delivery.get("side_effect_started"):
+                decision = check_outbound_freshness()
+                if decision is not None and decision.kind == "hold":
+                    mark_turn_freshness_held()
+                    logger.info(
+                        "event=outbound_freshness_held scope=%s conflict_count=%s",
+                        scope[:12],
+                        len(decision.conflicts),
+                    )
+                    return "freshness_held"
 
             attempt_number = send_attempts + 1
             self._record_side_effect_scope(scope)

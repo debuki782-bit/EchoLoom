@@ -8,6 +8,7 @@ import re
 import tempfile
 import wave
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from PIL import Image, ImageDraw
@@ -21,8 +22,10 @@ from .media_artifacts import (
     _file_md5 as _file_md5,
     _image_format,
 )
-from .memory_store import MemoryStore
 from .wechat_gateway import GatewayConfig, MessageEvent, create_gateway
+
+if TYPE_CHECKING:
+    from .memory_store import MemoryStore
 
 MAX_MODEL_IMAGE_BYTES = 14_000_000
 MAX_GIF_FRAME_PIXELS = 40_000_000

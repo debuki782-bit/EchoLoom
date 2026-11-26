@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .. import local_config
 from ..contacts import ContactIdentity
 from ..models import ConversationKey, ReplyDraft
-from ..turn_scope import active_conversation
 from .base import (
     AccountState,
     GatewayConfig,
@@ -135,10 +134,14 @@ class RouterGateway:
         connector = self._route(draft.key.account_id, draft.key.conversation_id)
         return connector.send_text(draft)
 
+    def _active_account_id(self) -> str:
+        provider = self.registry.active_account_provider
+        return provider() if provider is not None else ""
+
     def send_image(self, conversation_id: str, path: Path) -> tuple[str, str | None]:
-        active = active_conversation()
-        acct = active[0] if active is not None else ""
-        return self._route(acct, conversation_id).send_image(conversation_id, path)
+        return self._route(
+            self._active_account_id(), conversation_id
+        ).send_image(conversation_id, path)
 
     def send_quote(
         self,
@@ -146,9 +149,9 @@ class RouterGateway:
         text: str,
         quote: tuple[str, str, str, str],
     ) -> tuple[str, str | None]:
-        active = active_conversation()
-        acct = active[0] if active is not None else ""
-        return self._route(acct, conversation_id).send_quote(conversation_id, text, quote)
+        return self._route(
+            self._active_account_id(), conversation_id
+        ).send_quote(conversation_id, text, quote)
 
     def decode_image(self, source: Path, destination: Path) -> None:
         self.registry.default().connector.decode_image(source, destination)
@@ -204,6 +207,7 @@ class SourceRegistry:
         sources: Iterable[RegisteredSource] = (),
         *,
         default_source_id: str = "",
+        active_account_provider: Callable[[], str] | None = None,
     ) -> None:
         self.sources: dict[str, RegisteredSource] = {}
         for src in sources:
@@ -213,6 +217,7 @@ class SourceRegistry:
         self.default_source_id = (
             default_source_id if default_source_id in self.sources else next(iter(self.sources))
         )
+        self.active_account_provider = active_account_provider
         self._conversation_sources: dict[tuple[str, str], str] = {}
         self._conversation_only_sources: dict[str, str] = {}
 
@@ -292,6 +297,7 @@ class SourceRegistry:
         account_id: str = "",
         allowed_conversations: frozenset[ConversationKey] = frozenset(),
         send_enabled: bool = True,
+        active_account_provider: Callable[[], str] | None = None,
     ) -> SourceRegistry:
         """Build a SourceRegistry from env overrides, `.local/sources.toml`, or single default."""
         env_factory = (
@@ -331,6 +337,7 @@ class SourceRegistry:
             return cls(
                 [RegisteredSource(channel, channel, factory, connector, account_id=account_id)],
                 default_source_id=channel,
+                active_account_provider=active_account_provider or (lambda: account_id),
             )
 
         hook_cfg = local_config.load_local_runtime_config(workspace).wechat_hook
@@ -376,4 +383,8 @@ class SourceRegistry:
                     default_conversation_id=spec.default_conversation_id,
                 )
             )
-        return cls(registered, default_source_id=default_source_id)
+        return cls(
+            registered,
+            default_source_id=default_source_id,
+            active_account_provider=active_account_provider or (lambda: account_id),
+        )

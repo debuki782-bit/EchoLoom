@@ -16,6 +16,10 @@ model = "gemini-4-hydrogen"
 input_token_limit = 128000
 # Optional per-profile max output token override; omit to use the model default.
 # output_token_limit = 12000
+# Optional prompt-cache-aware rollover overrides; omit to keep idle_session_hours only.
+# cache_tier = "long_cache_1h" # or "short_cache_5m"
+# cache_recycle_idle_seconds = 720
+# cache_recycle_min_tokens = 8000
 idle_compression_tokens = 64000
 active_compression_tokens = 96000
 token_context_limits = true

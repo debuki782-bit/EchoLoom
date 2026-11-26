@@ -23,6 +23,7 @@ from ..runtime_contract import (
     ModelProviderUnavailable,
     Part as RuntimePart,
 )
+from ..turn_scope import is_turn_freshness_held
 
 _call_budget_state: ContextVar[list[int] | None] = ContextVar(
     "adk_call_budget_state",
@@ -278,6 +279,12 @@ class _Runner:
                 ):
                     progressed = True
                 yield event
+            if is_turn_freshness_held() and invocation_id is not None:
+                await self.delegate.rewind_async(
+                    user_id=kwargs["user_id"],
+                    session_id=kwargs["session_id"],
+                    rewind_before_invocation_id=invocation_id,
+                )
         except LlmCallsLimitExceededError as exc:
             raise ModelCallsLimitExceeded(str(exc)) from exc
         except ModelProviderUnavailable as exc:
@@ -296,6 +303,13 @@ class _Runner:
         finally:
             if budget_token is not None:
                 _call_budget_state.reset(budget_token)
+
+    async def rewind_invocation(self, *, user_id: str, session_id: str, invocation_id: str) -> None:
+        await self.delegate.rewind_async(
+            user_id=user_id,
+            session_id=session_id,
+            rewind_before_invocation_id=invocation_id,
+        )
 
     async def close(self):
         await self.delegate.close()

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from .context import ContextWindow, _safe_identity_name
+from .freshness_policy import FreshnessDecision
 
 operation_id: ContextVar[str] = ContextVar("wechat_operation", default="")
 operation_receipt_ids: ContextVar[tuple[str, ...]] = ContextVar(
@@ -25,6 +26,31 @@ followup_scheduler: ContextVar[
 ] = ContextVar(
     "wechat_followup_scheduler", default=None,
 )
+freshness_guard: ContextVar[Callable[[], FreshnessDecision] | None] = ContextVar(
+    "wechat_freshness_guard", default=None,
+)
+freshness_held_flag: ContextVar[list[bool] | None] = ContextVar(
+    "wechat_freshness_held_flag", default=None,
+)
+
+
+def check_outbound_freshness() -> FreshnessDecision | None:
+    """Evaluate any turn-scoped pre-send freshness guard."""
+    guard = freshness_guard.get()
+    return guard() if guard is not None else None
+
+
+def mark_turn_freshness_held() -> None:
+    """Record that the current turn's outbound send was held for newer inbound messages."""
+    flag = freshness_held_flag.get()
+    if flag is not None:
+        flag[0] = True
+
+
+def is_turn_freshness_held() -> bool:
+    """Return True if the active turn held its send due to newer inbound messages."""
+    flag = freshness_held_flag.get()
+    return bool(flag and flag[0])
 
 
 def tool_memory_context(window: ContextWindow) -> dict[str, object]:
@@ -84,6 +110,8 @@ def tool_turn_scope(
     receipt_ids=(),
     quote=None,
     schedule=None,
+    freshness: Callable[[], FreshnessDecision] | None = None,
+    freshness_held: list[bool] | None = None,
 ):
     """Bind and restore target-local tool state, including cancellation and nesting."""
     bindings: tuple[tuple[ContextVar, object], ...] = (
@@ -93,6 +121,8 @@ def tool_turn_scope(
         (memory_context, tool_memory_context(window)),
         (quote_context, quote),
         (followup_scheduler, schedule),
+        (freshness_guard, freshness),
+        (freshness_held_flag, freshness_held),
     )
     tokens = [(variable, variable.set(value)) for variable, value in bindings]
     try:

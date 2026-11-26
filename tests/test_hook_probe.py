@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-probe = runpy.run_path(str(ROOT / "experiments" / "wechat-hook-poc" / "receiver.py"))
+_PROBE_PATH = ROOT / "experiments" / "wechat-hook-poc" / "receiver.py"
+if not _PROBE_PATH.is_file():
+    pytest.skip("local experiments/wechat-hook-poc/receiver.py is absent", allow_module_level=True)
+probe = runpy.run_path(str(_PROBE_PATH))
 summarize = probe["summarize"]
 
 

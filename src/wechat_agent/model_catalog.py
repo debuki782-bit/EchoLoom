@@ -13,6 +13,7 @@ import tomllib
 from typing import Any
 
 from . import local_config
+from .session_recycle_policy import CacheRecycleRule, resolve_cache_recycle_rule
 
 MODELS_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "models.toml"
 
@@ -39,6 +40,9 @@ class ModelSpec:
     cache_write_rate_microusd: int
     thinking_level: str | None = None
     temporary_only_max_seconds: int | None = None
+    cache_tier: str | None = None
+    cache_recycle_idle_seconds: int | None = None
+    cache_recycle_min_tokens: int | None = None
     rate_tiers: tuple[RateTier, ...] = ()
 
     def _active_tier(self, at: str) -> RateTier | None:
@@ -118,6 +122,16 @@ class ModelCatalog:
     def all_model_ids(self) -> frozenset[str]:
         return frozenset(self.models.keys())
 
+    def cache_rule_for(self, model_id: str) -> CacheRecycleRule | None:
+        spec = self.models.get(model_id)
+        if spec is None:
+            return None
+        return resolve_cache_recycle_rule(
+            cache_tier=spec.cache_tier,
+            idle_seconds=spec.cache_recycle_idle_seconds,
+            min_context_tokens=spec.cache_recycle_min_tokens,
+        )
+
 
 def _nonneg_int(value: object, *, field: str, minimum: int = 0) -> int:
     if isinstance(value, bool) or type(value) is not int or value < minimum:
@@ -182,6 +196,35 @@ def _parse_model_spec(model_id: str, item: dict[str, Any]) -> ModelSpec:
     temp_max = item.get("temporary_only_max_seconds")
     if temp_max is not None:
         temp_max = _nonneg_int(temp_max, field=f"{model_id}.temporary_only_max_seconds", minimum=1)
+    raw_cache_tier = item.get("cache_tier")
+    cache_tier = str(raw_cache_tier).strip() if raw_cache_tier is not None else None
+    if cache_tier == "":
+        cache_tier = None
+    raw_cache_idle = item.get("cache_recycle_idle_seconds")
+    cache_recycle_idle_seconds = (
+        _nonneg_int(
+            raw_cache_idle,
+            field=f"{model_id}.cache_recycle_idle_seconds",
+            minimum=1,
+        )
+        if raw_cache_idle is not None
+        else None
+    )
+    raw_cache_min_tokens = item.get("cache_recycle_min_tokens")
+    cache_recycle_min_tokens = (
+        _nonneg_int(
+            raw_cache_min_tokens,
+            field=f"{model_id}.cache_recycle_min_tokens",
+            minimum=0,
+        )
+        if raw_cache_min_tokens is not None
+        else None
+    )
+    resolve_cache_recycle_rule(
+        cache_tier=cache_tier,
+        idle_seconds=cache_recycle_idle_seconds,
+        min_context_tokens=cache_recycle_min_tokens,
+    )
     tiers_raw = item.get("rate_tiers") or ()
     tiers: list[RateTier] = []
     if isinstance(tiers_raw, list):
@@ -221,6 +264,9 @@ def _parse_model_spec(model_id: str, item: dict[str, Any]) -> ModelSpec:
         cache_write_rate_microusd=write_rate,
         thinking_level=thinking,
         temporary_only_max_seconds=temp_max,
+        cache_tier=cache_tier,
+        cache_recycle_idle_seconds=cache_recycle_idle_seconds,
+        cache_recycle_min_tokens=cache_recycle_min_tokens,
         rate_tiers=tuple(tiers),
     )
 

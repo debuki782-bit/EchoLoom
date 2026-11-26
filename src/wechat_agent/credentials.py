@@ -4,6 +4,8 @@ The command-line entry point reads from a masked prompt. Never pass a key as
 an argument or print it. The gateway does not load this key yet.
 """
 
+from __future__ import annotations
+
 import argparse
 import ctypes
 import getpass

@@ -10,6 +10,7 @@ from pathlib import Path
 from .local_config import resolve_profile_path as _resolve_vault_profile_path
 from .model_catalog import load_model_catalog
 from .prompt_catalog import load_prompt
+from .session_recycle_policy import resolve_cache_recycle_rule
 
 PROFILE_PATH = Path(__file__).resolve().parents[2] / "config" / "agent_profiles.toml"
 LOCAL_PROFILE_FILENAME = "agent_profiles.local.toml"
@@ -47,6 +48,9 @@ class AgentProfile:
     max_history_records: int = DEFAULT_MAX_HISTORY_RECORDS
     max_history_bytes: int = DEFAULT_MAX_HISTORY_BYTES
     context_window_bytes: int = DEFAULT_CONTEXT_WINDOW_BYTES
+    cache_tier: str | None = None
+    cache_recycle_idle_seconds: int | None = None
+    cache_recycle_min_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -197,6 +201,37 @@ def load_agent_profiles(path: Path = PROFILE_PATH) -> AgentProfiles:
             field=f"{profile_id}.context_window_bytes",
             minimum=512,
         )
+        raw_cache_tier = item.get("cache_tier")
+        if raw_cache_tier is not None and not isinstance(raw_cache_tier, str):
+            raise ValueError(f"profile {profile_id}: cache_tier must be a string")
+        cache_tier = raw_cache_tier.strip() if isinstance(raw_cache_tier, str) else None
+        if cache_tier == "":
+            cache_tier = None
+        raw_cache_idle = item.get("cache_recycle_idle_seconds")
+        cache_recycle_idle_seconds = (
+            _positive_int(
+                raw_cache_idle,
+                field=f"{profile_id}.cache_recycle_idle_seconds",
+                minimum=1,
+            )
+            if raw_cache_idle is not None
+            else None
+        )
+        raw_cache_min_tokens = item.get("cache_recycle_min_tokens")
+        cache_recycle_min_tokens = (
+            _positive_int(
+                raw_cache_min_tokens,
+                field=f"{profile_id}.cache_recycle_min_tokens",
+                minimum=0,
+            )
+            if raw_cache_min_tokens is not None
+            else None
+        )
+        resolve_cache_recycle_rule(
+            cache_tier=cache_tier,
+            idle_seconds=cache_recycle_idle_seconds,
+            min_context_tokens=cache_recycle_min_tokens,
+        )
         profiles[profile_id] = AgentProfile(
             profile_id=profile_id,
             model_id=model_id,
@@ -222,6 +257,9 @@ def load_agent_profiles(path: Path = PROFILE_PATH) -> AgentProfiles:
             max_history_records=max_history_records,
             max_history_bytes=max_history_bytes,
             context_window_bytes=context_window_bytes,
+            cache_tier=cache_tier,
+            cache_recycle_idle_seconds=cache_recycle_idle_seconds,
+            cache_recycle_min_tokens=cache_recycle_min_tokens,
         )
     if default_id not in profiles:
         raise ValueError("default_profile must name a configured profile")

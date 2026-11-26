@@ -119,6 +119,7 @@ class TurnState:
     model_id: str = ""
     safety_recovery_turn: bool = False
     summary_only_turn: bool = False
+    freshness_held: bool = False
     cross_chat_context: str = ""
     event_book_provider: Callable[[], str] | None = None
     persona_prompt: str = "persona"

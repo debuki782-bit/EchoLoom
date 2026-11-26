@@ -35,7 +35,7 @@ flowchart LR
         RUNTIME --> ROLL["SessionRolloverPolicy"]
         RUNTIME --> DEDUPE["CrossChatDedupeStore"]
         RUNTIME --> HOOKS["TurnHooks (Trace / EpisodeRAG / Jev)"]
-        RUNTIME --> LLM["OpenAI Agents SDK / Google ADK + UsageLedger"]
+        RUNTIME --> LLM["Google ADK (+ OpenAIAdkModel 适配) + UsageLedger"]
         RUNTIME --> WTOOLS["Layer 5: WeChatTools 门面"]
         WTOOLS --> TSETS["Toolsets: Reply / Media / Memory (11 工具)"]
         RUNTIME --> XTOOLS["CrossSessionService / CrossSessionToolset"]
@@ -76,7 +76,7 @@ flowchart LR
 
 | 模式 | 入口与参数 | 进程与导入特征 | 典型用途 |
 |---|---|---|---|
-| **Scheme A：独立 Ingress** | `scripts/run-ingress.py --run` (36L)<br/>或 `scripts/run-group-pilot.py --run --role ingress` | 独占 `127.0.0.1:8080`，**零 LLM SDK 导入**（不加载 `openai`/`agents`/`google.adk`/`google.genai`/`EpisodeMemory`/`ScopedAgentRuntime`），仅写 WAL `pilot-receipts.sqlite3`。 | 生产常驻回调接收面，保证 Worker 重启或升级期间零丢消息。 |
+| **Scheme A：独立 Ingress** | `scripts/run-ingress.py --run` (36L)<br/>或 `scripts/run-group-pilot.py --run --role ingress` | 独占 `127.0.0.1:8080`，**零 LLM SDK 导入**（不加载 `openai`/`google.adk`/`google.genai`/`EpisodeMemory`/`ScopedAgentRuntime`），仅写 WAL `pilot-receipts.sqlite3`。 | 生产常驻回调接收面，保证 Worker 重启或升级期间零丢消息。 |
 | **Scheme A：独立 Worker** | `scripts/run-group-pilot.py --run --role worker` (53L) | 不监听 `:8080`，经 `bootstrap.run_worker_loop()` 启动 `Dispatcher`、`Triggers` 与 Agent 运行时，定期刷新 `worker_heartbeat`。 | 生产推理与发送执行面；可通过 `scripts/live.ps1 -Action restart-worker` 独立重启，且被 `scripts/watch-services.py` 优先按 worker-only 自愈。 |
 | **同进程兼容模式** | `scripts/run-group-pilot.py --run --role all`（默认）<br/>或测试中的 `create_pilot_app(pilot)` | 单进程同时挂载 `Ingress` `:8080` 与 `Dispatcher`/`Triggers`。 | 本地联调、回归测试与向后兼容运行。 |
 | **运维编排与看门狗** | `scripts/live.ps1` (315L, UTF-8 BOM)<br/>`scripts/start-services.ps1` (333L, UTF-8 BOM)<br/>`scripts/watch-services.py` (409L) | `live.ps1` 支持 `status / start / stop / pause / resume / restart-worker`；`pause`/`resume` 继续兼容 `pilot-receipts.sqlite3` `control` 表。 | 生产日常启停、状态巡检、只重启 Worker 与自动看护。 |
@@ -95,8 +95,7 @@ flowchart LR
 | `data/pilot-receipts.sqlite3` | `ConversationScheduler`（Ingress 入队 / Worker 认领与心跳；`live.ps1` 写 `control`、`watch-services.py` 读 `pilot_inbox`） | `pilot_inbox`（入站调度单一真源）、`worker_heartbeat`（Worker 存活与积压状态）、`control`（pause/resume）、`attempts`（仅作终态审计兼容，不再拦截入站重放）。 |
 | `data/agent-memory.sqlite3` | `MemoryStore`（`MessageRepo`/`MediaRepo`/`KnowledgeRepo`）、`TimeScheduler`、`EventBook`、`CrossSessionService`（`trace_dashboard.py`、`watch-services.py`、`scripts/image-library.py` 只读） | 24 张业务表：消息原文/JEV 标签、媒体与图片库修订/音频转写、备注/词典/用户事实/发送人资料与标签/审计、`time_jobs`（已修复空转热写并带自动 prune）、事件簿与空闲活动。 |
 | `data/tool-receipts.sqlite3` | `OutboundService`（`outbound.py`） | 工具发送幂等回执、跨 rebatch 去重、失败计数与提醒状态（4 张原表结构不变）。 |
-| `data/openai-sessions.sqlite3`<br/>`data/openai-sessions-routing.sqlite3` | OpenAI Agents SDK 运行时 / `SessionRolloverPolicy` / `CrossChatDedupeStore` | OpenAI 会话事件、generation 路由（`active_sessions`）与跨聊天去重（`session_other_message_seen`）。 |
-| `data/live-sessions.sqlite3`<br/>`data/live-sessions-routing.sqlite3` | Google ADK `DatabaseSessionService` / `SessionRolloverPolicy` / `CrossChatDedupeStore` | Google ADK 会话事件、generation 路由与跨聊天去重。 |
+| `data/live-sessions.sqlite3`<br/>`data/live-sessions-routing.sqlite3` | Google ADK `DatabaseSessionService` / `SessionRolloverPolicy` / `CrossChatDedupeStore` | 统一承载 Google ADK 与 `OpenAIAdkModel` 会话事件、generation 路由（`active_sessions`）与跨聊天去重（`session_other_message_seen`）。 |
 | `data/pilot-usage.sqlite3` | `Repository`（`storage.py`） / `UsageLedger`（`usage.py`） | 模型调用预算预留、实际结算与北京时间（UTC+8 `Asia/Shanghai`）自然日重置记录；具体模型与限额由 `config/agent_profiles.toml` 与 `agent_profiles.py` 加载。 |
 | `data/episode-memory.sqlite3` | `EpisodeMemory`（经 `EpisodeRagTurnHook` 召回与入队） | 事件级长期记忆与检索索引。 |
 | `data/conversation-model-overrides.sqlite3` | `ConversationModelOverrideStore` | 按会话动态覆盖模型配置。 |
