@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -134,6 +135,55 @@ def test_information_agent_receives_message_time_and_separate_speaker_identity(t
         assert payload["recent"][0]["direction"] == "outbound"
         assert payload["recent"][0]["speaker_id"] == "bot"
         assert payload["recent"][0]["message_time"] == "2026-11-06 22:59"
+        await memory.close()
+        repo.close()
+
+    asyncio.run(scenario())
+
+
+def test_episode_memory_default_floor_blocks_background_noise_and_skips_phatic_ok(tmp_path):
+    async def scenario():
+        repo = Repository(tmp_path / "usage.sqlite3")
+        usage = UsageLedger(repo, SystemClock())
+        embed = AsyncMock(side_effect=[
+            SimpleNamespace(data=[SimpleNamespace(embedding=[1.0, 0.0] + [0.0] * (DIMENSIONS - 2))], usage=SimpleNamespace(total_tokens=10)),
+            SimpleNamespace(data=[SimpleNamespace(embedding=[0.42, math.sqrt(1 - 0.42 ** 2)] + [0.0] * (DIMENSIONS - 2))], usage=SimpleNamespace(total_tokens=10)),
+        ])
+        curator_model = _FakeCuratorLlm(
+            [InformationAgentResult(events=[EpisodeDraft(summary="GLM 发版单元测试吐槽")])]
+        )
+        memory = EpisodeMemory(
+            tmp_path / "episodes.sqlite3", SimpleNamespace(embeddings=SimpleNamespace(create=embed)),
+            curator_model, usage, account_budget=10000, account_text_budget=10000,
+        )
+        assert memory.score_floor == 0.50
+
+        with model_usage_scope("account", "room"):
+            seed = RecallTurn(ContextWindow(
+                "account", "room", True,
+                (ContextTurn("person", "hook", "之前单元测试浪费了一小时", message_id="m1"),),
+            ), eligible=True)
+            memory.enqueue(seed)
+            await memory.jobs.join()
+
+            # Low-similarity (0.42 < 0.50) query must not inject unrelated episode.
+            noisy = RecallTurn(ContextWindow(
+                "account", "room", True,
+                (ContextTurn("person", "hook", "面试官聊了一下他们的项目", message_id="m2"),),
+            ), eligible=True)
+            await memory.automatic(noisy)
+            assert noisy.automatic == []
+            assert embed.await_count == 2
+
+            # Ultra-short phatic message ("ok") must not pad unrelated history to embed.
+            phatic = RecallTurn(ContextWindow(
+                "account", "room", True,
+                (ContextTurn("person", "hook", "ok", message_id="m3"),),
+                history_turns=(ContextTurn("person", "hook", "前面随便聊聊的废话", message_id="m2"),),
+            ), eligible=True)
+            await memory.automatic(phatic)
+            assert phatic.automatic == []
+            assert embed.await_count == 2
         await memory.close()
         repo.close()
 

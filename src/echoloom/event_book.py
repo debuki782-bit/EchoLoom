@@ -261,7 +261,7 @@ class EventBook:
             raise TypeError("event content must be text")
         text = " ".join(value.split())
         if not text or len(text) > limit or "\0" in text:
-            raise ValueError("event text is empty or exceeds its character limit")
+            raise ValueError(f"event text is empty or exceeds {limit} chars")
         return text
 
     @staticmethod

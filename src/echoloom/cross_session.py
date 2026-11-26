@@ -28,7 +28,7 @@ from .cross_session_sql import (
     is_sql_scalar,
     parse_query_time,
 )
-from .memory_store import MAX_QUERY_CHARS, MemoryStore
+from .memory_store import MAX_QUERY_CHARS, MemoryStore, _like_escape
 from .prompt_catalog import fill_prompt
 from .tool_timing import turn_deadline_monotonic
 
@@ -258,8 +258,10 @@ class CrossSessionService:
                     clauses.append("conversation_id=?")
                     values.append(scope_id)
                 if query_text:
-                    clauses.append("body_text LIKE ?")
-                    values.append(f"%{query_text}%")
+                    tokens = list(dict.fromkeys(tok for tok in query_text.split() if tok))[:6]
+                    for tok in tokens:
+                        clauses.append("body_text LIKE ? ESCAPE '\\'")
+                        values.append(f"%{_like_escape(tok)}%")
                 if sender_id:
                     clauses.append("sender_id=?")
                     values.append(sender_id)

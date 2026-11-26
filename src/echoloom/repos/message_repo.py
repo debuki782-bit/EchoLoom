@@ -647,6 +647,134 @@ class MessageRepo:
             is not None
         )
 
+    def message_conversation(
+        self, *, message_id: str, account_id: str
+    ) -> str | None:
+        """Return the active conversation ID for an account-archived message, if present."""
+        if not message_id or not account_id:
+            return None
+        row = self.db.execute(
+            "SELECT conversation_id FROM source_messages WHERE message_id=? AND account_id=? "
+            "AND deleted_at IS NULL AND expires_at>?",
+            (message_id, account_id, _now()),
+        ).fetchone()
+        return str(row["conversation_id"]) if row is not None else None
+
+    def idle_curation_snapshot(
+        self, *, account_id: str, since_at: str | None
+    ) -> dict[str, object]:
+        """Collect objective message deltas and active memory inventory for idle runs."""
+        now_dt = datetime.now(UTC)
+        now_text = now_dt.isoformat()
+        since_iso: str | None = None
+        if since_at:
+            try:
+                parsed = datetime.fromisoformat(since_at)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+                since_iso = parsed.astimezone(UTC).isoformat()
+            except ValueError:
+                since_iso = None
+
+        clauses = [
+            "s.account_id=?",
+            "s.direction='inbound'",
+            "s.deleted_at IS NULL",
+            "s.expires_at>?",
+            "s.captured_at<=?",
+        ]
+        params: list[object] = [account_id, now_text, now_text]
+        if since_iso is not None:
+            clauses.append("s.captured_at>?")
+            params.append(since_iso)
+        where = " AND ".join(clauses)
+
+        with self._lock:
+            conv_rows = self.db.execute(
+                f"SELECT s.conversation_id, COUNT(*) AS cnt, MAX(s.captured_at) AS latest_at "
+                f"FROM source_messages s WHERE {where} "
+                f"GROUP BY s.conversation_id ORDER BY cnt DESC, latest_at DESC",
+                params,
+            ).fetchall()
+            new_total = sum(int(row["cnt"]) for row in conv_rows)
+            unannotated = int(
+                self.db.execute(
+                    f"SELECT COUNT(*) FROM source_messages s WHERE {where} "
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM annotations a "
+                    "WHERE a.account_id=s.account_id AND a.message_id=s.message_id "
+                    "AND a.state='active'"
+                    ")",
+                    params,
+                ).fetchone()[0]
+            )
+            counts: dict[str, int] = {
+                "annotations": int(
+                    self.db.execute(
+                        "SELECT COUNT(*) FROM annotations WHERE account_id=? AND state='active'",
+                        (account_id,),
+                    ).fetchone()[0]
+                ),
+                "user_facts": int(
+                    self.db.execute(
+                        "SELECT COUNT(*) FROM user_facts WHERE account_id=? AND state='active'",
+                        (account_id,),
+                    ).fetchone()[0]
+                ),
+                "sender_memories": int(
+                    self.db.execute(
+                        "SELECT COUNT(*) FROM sender_memories "
+                        "WHERE account_id=? AND state='active'",
+                        (account_id,),
+                    ).fetchone()[0]
+                ),
+                "entity_terms": int(
+                    self.db.execute(
+                        "SELECT COUNT(*) FROM entity_terms WHERE account_id=? AND state='active'",
+                        (account_id,),
+                    ).fetchone()[0]
+                ),
+                "event_book_active": 0,
+                "event_book_stale_72h": 0,
+            }
+            has_event_book = (
+                self.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_book'"
+                ).fetchone()
+                is not None
+            )
+            if has_event_book:
+                counts["event_book_active"] = int(
+                    self.db.execute(
+                        "SELECT COUNT(*) FROM event_book WHERE account_id=? AND state='active' "
+                        "AND (expires_at IS NULL OR expires_at>?)",
+                        (account_id, now_text),
+                    ).fetchone()[0]
+                )
+                stale_cutoff = (now_dt - timedelta(hours=72)).isoformat()
+                counts["event_book_stale_72h"] = int(
+                    self.db.execute(
+                        "SELECT COUNT(*) FROM event_book WHERE account_id=? AND state='active' "
+                        "AND priority='ordinary' AND updated_at<=? "
+                        "AND (expires_at IS NULL OR expires_at>?)",
+                        (account_id, stale_cutoff, now_text),
+                    ).fetchone()[0]
+                )
+        return {
+            "since_at": since_iso,
+            "new_human_messages": new_total,
+            "unannotated_new_messages": unannotated,
+            "by_conversation": [
+                {
+                    "conversation_id": str(row["conversation_id"]),
+                    "count": int(row["cnt"]),
+                    "latest_at": str(row["latest_at"]),
+                }
+                for row in conv_rows[:5]
+            ],
+            "active_counts": counts,
+        }
+
     def message_exists_for_sender(self, account_id: str, sender_id: str) -> bool:
         return (
             self.db.execute(

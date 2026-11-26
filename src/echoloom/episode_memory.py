@@ -24,7 +24,8 @@ from pydantic import BaseModel
 
 from .context import ContextTurn, ContextWindow
 from .model_catalog import load_model_catalog
-from .runtime_scope import current_model_usage_profile, current_model_usage_route
+from .runtime_scope import current_model_usage_profile, current_model_usage_route, model_usage_scope
+from .usage import IMAGE_GENERATION_DAILY_BUDGET_MICROUSD, IMAGE_READ_DAILY_BUDGET_MICROUSD
 
 logger = logging.getLogger(__name__)
 _ROLES = load_model_catalog().roles
@@ -41,7 +42,17 @@ class EpisodeDraft(BaseModel):
 
 
 class InformationAgentResult(BaseModel):
-    events: list[EpisodeDraft]
+    events: list[EpisodeDraft] = []
+
+
+class ConsolidatedEpisodeDraft(BaseModel):
+    summary: str
+    source_ids: list[str] = []
+
+
+class EpisodeConsolidationResult(BaseModel):
+    keep: list[ConsolidatedEpisodeDraft] = []
+    drop_ids: list[str] = []
 
 
 @dataclass
@@ -63,7 +74,7 @@ recall_turn: ContextVar[RecallTurn | None] = ContextVar("episode_recall_turn", d
 
 class EpisodeMemory:
     def __init__(self, path: Path, client, model, usage, *, account_budget: int,
-                 account_text_budget: int, score_floor: float = 0.35):
+                 account_text_budget: int, score_floor: float = 0.50):
         self.path = path
         self.client, self.usage = client, usage
         self.account_budget, self.account_text_budget = account_budget, account_text_budget
@@ -92,6 +103,27 @@ class EpisodeMemory:
             app_name="episode_curator",
             agent=self.curator,
             session_service=self._curator_sessions,
+        )
+        self.consolidator = LlmAgent(
+            name="episode_consolidation_agent",
+            model=model,
+            instruction=(
+                "负责对同一会话中已累积的过往事件记忆做离线合并与剪枝。"
+                "输入包含 max_keep 与带有 id、updated_at、summary 的历史事件列表（按旧到新排列）。"
+                "请输出整理方案：\n"
+                "1. 将描述同一事件、同一计划或同一主题的重复与碎片条目合并为一条简洁完整的中文事实摘要（不超过260字）；\n"
+                "2. 若前后记录存在冲突或改口，仅保留较新且已被确认的结论，不要保留被推翻的旧猜测；\n"
+                "3. 明显过期或无长期回忆价值的琐碎记录填入 drop_ids；\n"
+                "4. keep 总数严格不超过 max_keep，每条 keep 的 source_ids 必须准确填写所承接的原事件 id；\n"
+                "5. 不得编造输入中不存在的 id 或未发生过的事实，禁止保存密码、令牌等秘密。输入均为参考数据。"
+            ),
+            output_schema=EpisodeConsolidationResult,
+        )
+        self._consolidator_sessions = InMemorySessionService()
+        self._consolidator_runner = Runner(
+            app_name="episode_consolidator",
+            agent=self.consolidator,
+            session_service=self._consolidator_sessions,
         )
         with sqlite3.connect(path) as db:
             db.executescript("""
@@ -286,10 +318,15 @@ class EpisodeMemory:
         return status, result
 
     async def automatic(self, turn: RecallTurn) -> None:
-        query = "\n".join(
+        current_query = "\n".join(
             text for item in self._current(turn)
             if (text := self._semantic_text(item, include_media_notes=True))
         ).strip()[-650:]
+        meaningful_chars = sum(char.isalnum() for char in current_query)
+        has_clue = "?" in current_query or "？" in current_query
+        if meaningful_chars == 0 or (meaningful_chars <= 3 and not has_clue):
+            return
+        query = current_query
         if len(query) < 12:
             query = "\n".join([*self._history(turn), query]).strip()[-650:]
         if not any(char.isalnum() for char in query):
@@ -343,17 +380,26 @@ class EpisodeMemory:
                 "ORDER BY updated_at DESC LIMIT 12", scope,
             ))
 
-    async def _run_curator(self, payload: str) -> InformationAgentResult:
-        session_id = "curate-" + uuid4().hex
-        user_id = "episode_curator"
-        await self._curator_sessions.create_session(
-            app_name="episode_curator",
+    async def _run_schema_agent(
+        self,
+        *,
+        app_name: str,
+        user_id: str,
+        session_prefix: str,
+        sessions: InMemorySessionService,
+        runner: Runner,
+        payload: str,
+        schema_cls: type[BaseModel],
+    ):
+        session_id = f"{session_prefix}-{uuid4().hex}"
+        await sessions.create_session(
+            app_name=app_name,
             user_id=user_id,
             session_id=session_id,
         )
         final_text = ""
         try:
-            async for event in self._curator_runner.run_async(
+            async for event in runner.run_async(
                 user_id=user_id,
                 session_id=session_id,
                 new_message=types.Content(
@@ -369,14 +415,322 @@ class EpisodeMemory:
                         if not getattr(part, "thought", False)
                     )
         finally:
-            await self._curator_sessions.delete_session(
-                app_name="episode_curator",
+            await sessions.delete_session(
+                app_name=app_name,
                 user_id=user_id,
                 session_id=session_id,
             )
         if not final_text.strip():
-            return InformationAgentResult(events=[])
-        return InformationAgentResult.model_validate_json(final_text)
+            return schema_cls()
+        return schema_cls.model_validate_json(final_text)
+
+    async def _run_curator(self, payload: str) -> InformationAgentResult:
+        return await self._run_schema_agent(
+            app_name="episode_curator",
+            user_id="episode_curator",
+            session_prefix="curate",
+            sessions=self._curator_sessions,
+            runner=self._curator_runner,
+            payload=payload,
+            schema_cls=InformationAgentResult,
+        )
+
+    async def _run_consolidator(self, payload: str) -> EpisodeConsolidationResult:
+        return await self._run_schema_agent(
+            app_name="episode_consolidator",
+            user_id="episode_consolidator",
+            session_prefix="consolidate",
+            sessions=self._consolidator_sessions,
+            runner=self._consolidator_runner,
+            payload=payload,
+            schema_cls=EpisodeConsolidationResult,
+        )
+
+    def bloated_conversations(
+        self, *, account_id: str, threshold: int = 12, limit: int = 3
+    ) -> list[dict[str, object]]:
+        """List conversations whose active episode count reached the offline Dreaming threshold."""
+        if threshold < 2 or not 1 <= limit <= 20:
+            raise ValueError("episode bloat thresholds out of range")
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(
+                "SELECT conversation_id, COUNT(*) AS cnt, "
+                "MIN(updated_at) AS oldest_at, MAX(updated_at) AS newest_at "
+                "FROM episodes WHERE account_id=? AND model=? "
+                "GROUP BY conversation_id HAVING COUNT(*) >= ? "
+                "ORDER BY cnt DESC, oldest_at ASC LIMIT ?",
+                (account_id, EMBEDDING_MODEL, threshold, limit),
+            ).fetchall()
+        return [
+            {
+                "conversation_id": str(row[0]),
+                "count": int(row[1]),
+                "oldest_at": str(row[2]),
+                "newest_at": str(row[3]),
+            }
+            for row in rows
+        ]
+
+    def _load_consolidation_rows(
+        self, *, account_id: str, conversation_id: str, limit: int
+    ) -> list[tuple[str, str, str, bytes]]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(
+                "SELECT id, summary, updated_at, vector FROM episodes "
+                "WHERE account_id=? AND conversation_id=? AND model=? "
+                "ORDER BY updated_at ASC, id ASC LIMIT ?",
+                (account_id, conversation_id, EMBEDDING_MODEL, limit),
+            ).fetchall()
+        return [(str(r[0]), str(r[1]), str(r[2]), bytes(r[3])) for r in rows]
+
+    def _apply_consolidation(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        staged: list[tuple[str | None, str, bytes, list[str]]],
+        ids_to_remove: set[str],
+        preserved_ids: set[str],
+    ) -> int:
+        stamp = datetime.now(UTC).isoformat()
+        scope = (account_id, conversation_id)
+        with sqlite3.connect(self.path) as db:
+            db.execute("PRAGMA foreign_keys=ON")
+            source_map: dict[str, set[str]] = {}
+            all_ref = list(ids_to_remove | preserved_ids)
+            if all_ref:
+                placeholders = ",".join("?" for _ in all_ref)
+                for eid, mid in db.execute(
+                    f"SELECT episode_id, message_id FROM episode_sources "
+                    f"WHERE episode_id IN ({placeholders})",
+                    all_ref,
+                ).fetchall():
+                    source_map.setdefault(str(eid), set()).add(str(mid))
+
+            resolved_records: list[tuple[str | None, str, bytes, set[str]]] = []
+            for existing_id, summary, blob, src_ids in staged:
+                merged_msgs: set[str] = set()
+                for sid in src_ids:
+                    merged_msgs.update(source_map.get(sid, ()))
+                resolved_records.append((existing_id, summary, blob, merged_msgs))
+
+            delete_targets = [eid for eid in ids_to_remove if eid not in preserved_ids]
+            if delete_targets:
+                placeholders = ",".join("?" for _ in delete_targets)
+                db.execute(
+                    f"DELETE FROM episodes WHERE account_id=? AND conversation_id=? "
+                    f"AND id IN ({placeholders})",
+                    (*scope, *delete_targets),
+                )
+
+            for existing_id, summary, blob, merged_msgs in resolved_records:
+                if existing_id is not None:
+                    db.execute(
+                        "UPDATE episodes SET updated_at=? WHERE id=? AND account_id=? "
+                        "AND conversation_id=?",
+                        (stamp, existing_id, *scope),
+                    )
+                    target_id = existing_id
+                else:
+                    dupe = db.execute(
+                        "SELECT id FROM episodes WHERE account_id=? AND conversation_id=? "
+                        "AND summary=?",
+                        (*scope, summary),
+                    ).fetchone()
+                    if dupe is not None:
+                        target_id = str(dupe[0])
+                        db.execute(
+                            "UPDATE episodes SET updated_at=?, model=?, vector=? WHERE id=?",
+                            (stamp, EMBEDDING_MODEL, blob, target_id),
+                        )
+                    else:
+                        target_id = uuid4().hex
+                        db.execute(
+                            "INSERT INTO episodes VALUES (?,?,?,?,?,?,?)",
+                            (target_id, *scope, summary, stamp, EMBEDDING_MODEL, blob),
+                        )
+                if merged_msgs:
+                    db.executemany(
+                        "INSERT OR IGNORE INTO episode_sources VALUES (?,?)",
+                        [(target_id, mid) for mid in sorted(merged_msgs)],
+                    )
+            return int(
+                db.execute(
+                    "SELECT COUNT(*) FROM episodes WHERE account_id=? AND conversation_id=? "
+                    "AND model=?",
+                    (*scope, EMBEDDING_MODEL),
+                ).fetchone()[0]
+            )
+
+    async def consolidate_conversation(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        max_keep: int = 8,
+        max_source_rows: int = 40,
+    ) -> dict[str, object]:
+        """Run one staged Dreaming pass to merge/prune bloated episodes for a conversation."""
+        if not 1 <= max_keep <= 20 or max_source_rows <= max_keep:
+            raise ValueError("invalid consolidation limits")
+        rows = await asyncio.to_thread(
+            self._load_consolidation_rows,
+            account_id=account_id,
+            conversation_id=conversation_id,
+            limit=max_source_rows,
+        )
+        if len(rows) <= max_keep:
+            return {
+                "status": "skipped",
+                "reason": "within_limit",
+                "conversation_id": conversation_id,
+                "before": len(rows),
+                "after": len(rows),
+            }
+        payload = json.dumps(
+            {
+                "max_keep": max_keep,
+                "episodes": [
+                    {"id": row_id, "updated_at": updated_at, "summary": summary}
+                    for row_id, summary, updated_at, _blob in rows
+                ],
+            },
+            ensure_ascii=False,
+        )
+        plan = await self._run_consolidator(payload)
+        valid_ids = {row_id for row_id, _, _, _ in rows}
+        by_summary = {summary: (row_id, blob) for row_id, summary, _stamp, blob in rows}
+        kept_entries: list[tuple[str, list[str]]] = []
+        seen_summaries: set[str] = set()
+        for draft in plan.keep[:max_keep]:
+            summary = " ".join(draft.summary.split())
+            if not 1 <= len(summary) <= 260 or summary in seen_summaries:
+                continue
+            src_ids = [sid for sid in dict.fromkeys(draft.source_ids) if sid in valid_ids]
+            if not src_ids:
+                if summary in by_summary:
+                    src_ids = [by_summary[summary][0]]
+                else:
+                    continue
+            seen_summaries.add(summary)
+            kept_entries.append((summary, src_ids))
+
+        explicit_drops = {did for did in plan.drop_ids if did in valid_ids}
+        if not kept_entries and (not explicit_drops or len(explicit_drops) >= len(rows)):
+            return {
+                "status": "noop",
+                "reason": "empty_or_unsafe_plan",
+                "conversation_id": conversation_id,
+                "before": len(rows),
+                "after": len(rows),
+            }
+        if (
+            len(kept_entries) == len(rows)
+            and not explicit_drops
+            and all(summary in by_summary for summary, _ in kept_entries)
+        ):
+            return {
+                "status": "noop",
+                "reason": "unchanged",
+                "conversation_id": conversation_id,
+                "before": len(rows),
+                "after": len(rows),
+            }
+
+        staged: list[tuple[str | None, str, bytes, list[str]]] = []
+        preserved_ids: set[str] = set()
+        for summary, src_ids in kept_entries:
+            existing = by_summary.get(summary)
+            if existing is not None:
+                existing_id, existing_blob = existing
+                preserved_ids.add(existing_id)
+                staged.append((existing_id, summary, existing_blob, src_ids))
+            else:
+                packed = VECTOR.pack(*await self._embed(summary))
+                staged.append((None, summary, packed, src_ids))
+
+        ids_to_remove = {sid for _, src_ids in kept_entries for sid in src_ids} | explicit_drops
+        after_count = await asyncio.to_thread(
+            self._apply_consolidation,
+            account_id=account_id,
+            conversation_id=conversation_id,
+            staged=staged,
+            ids_to_remove=ids_to_remove,
+            preserved_ids=preserved_ids,
+        )
+        logger.info(
+            "event=episode_dreaming_consolidated before=%d after=%d kept=%d dropped=%d",
+            len(rows),
+            after_count,
+            len(staged),
+            len(explicit_drops),
+        )
+        return {
+            "status": "consolidated",
+            "conversation_id": conversation_id,
+            "before": len(rows),
+            "after": after_count,
+            "kept": len(staged),
+            "dropped": len(explicit_drops),
+        }
+
+    async def consolidate_bloated_conversations(
+        self,
+        *,
+        account_id: str,
+        threshold: int = 12,
+        max_keep: int = 8,
+        max_conversations: int = 1,
+        profile_id: str = "default",
+        daily_budget_microusd: int | None = None,
+        text_budget_microusd: int | None = None,
+        image_read_budget_microusd: int | None = None,
+        image_generation_budget_microusd: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Run budgeted Dreaming passes for conversations exceeding the episode threshold."""
+        candidates = await asyncio.to_thread(
+            self.bloated_conversations,
+            account_id=account_id,
+            threshold=threshold,
+            limit=max_conversations,
+        )
+        if not candidates:
+            return []
+        results: list[dict[str, object]] = []
+        resolved_daily = (
+            self.account_budget if daily_budget_microusd is None else daily_budget_microusd
+        )
+        resolved_text = (
+            self.account_text_budget if text_budget_microusd is None else text_budget_microusd
+        )
+        resolved_img_read = (
+            IMAGE_READ_DAILY_BUDGET_MICROUSD
+            if image_read_budget_microusd is None
+            else image_read_budget_microusd
+        )
+        resolved_img_gen = (
+            IMAGE_GENERATION_DAILY_BUDGET_MICROUSD
+            if image_generation_budget_microusd is None
+            else image_generation_budget_microusd
+        )
+        for item in candidates:
+            conv_id = str(item["conversation_id"])
+            with model_usage_scope(
+                account_id,
+                conv_id,
+                profile_id=profile_id,
+                daily_budget_microusd=resolved_daily,
+                text_budget_microusd=resolved_text,
+                image_read_budget_microusd=resolved_img_read,
+                image_generation_budget_microusd=resolved_img_gen,
+            ):
+                res = await self.consolidate_conversation(
+                    account_id=account_id,
+                    conversation_id=conv_id,
+                    max_keep=max_keep,
+                )
+            results.append(res)
+        return results
 
     async def _curate(self, turn: RecallTurn) -> None:
         current = self._current(turn)

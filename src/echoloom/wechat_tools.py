@@ -382,8 +382,17 @@ class ChannelToolkit:
 
     # --- MemoryToolset delegates ---
 
-    async def remember_user_fact(self, fact_key: str, content: str) -> dict:
-        return await self.memory_tools.remember_user_fact(fact_key, content)
+    async def remember_user_fact(
+        self,
+        fact_key: str,
+        content: str,
+        source_message_id: str = "",
+    ) -> dict:
+        return await self.memory_tools.remember_user_fact(
+            fact_key,
+            content,
+            source_message_id=source_message_id,
+        )
 
     async def search_user_memory(self, query: str) -> dict:
         return await self.memory_tools.search_user_memory(query)

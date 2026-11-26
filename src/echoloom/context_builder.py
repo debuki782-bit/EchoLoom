@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Literal
 
 from .contacts import (
@@ -54,6 +55,7 @@ class ContextSpec:
     include_daily_env: bool = True
     include_priority_senders: bool = True
     include_quick_send_images: bool = True
+    include_user_fact_index: bool = True
     scheduled_task: str | None = None
     delivery_notices: tuple[str, ...] = ()
     cancelled_followup: bool = False
@@ -74,6 +76,7 @@ class ContextSpec:
         include_daily_env: bool = True,
         include_priority_senders: bool = True,
         include_quick_send_images: bool = True,
+        include_user_fact_index: bool = True,
         delivery_notices: Sequence[str] = (),
         cancelled_followup: bool = False,
     ) -> ContextSpec:
@@ -110,6 +113,7 @@ class ContextSpec:
             include_daily_env=include_daily_env,
             include_priority_senders=include_priority_senders,
             include_quick_send_images=include_quick_send_images,
+            include_user_fact_index=include_user_fact_index,
             delivery_notices=tuple(delivery_notices),
             cancelled_followup=cancelled_followup,
         )
@@ -132,6 +136,7 @@ class ContextSpec:
         include_daily_env: bool = True,
         include_priority_senders: bool = True,
         include_quick_send_images: bool = True,
+        include_user_fact_index: bool = True,
         delivery_notices: Sequence[str] = (),
     ) -> ContextSpec:
         if ingested is not None:
@@ -177,6 +182,7 @@ class ContextSpec:
             include_daily_env=include_daily_env,
             include_priority_senders=include_priority_senders,
             include_quick_send_images=include_quick_send_images,
+            include_user_fact_index=include_user_fact_index,
             scheduled_task=scheduled_task,
             delivery_notices=tuple(delivery_notices),
         )
@@ -200,6 +206,7 @@ class ContextSpec:
         include_daily_env: bool = True,
         include_priority_senders: bool = True,
         include_quick_send_images: bool = True,
+        include_user_fact_index: bool = True,
         extra_identifiers: Sequence[str] = (),
     ) -> ContextSpec:
         if ingested is not None:
@@ -228,6 +235,7 @@ class ContextSpec:
             include_daily_env=include_daily_env,
             include_priority_senders=include_priority_senders,
             include_quick_send_images=include_quick_send_images,
+            include_user_fact_index=include_user_fact_index,
             query_hint=query_hint,
             extra_identifiers=tuple(extra_identifiers),
         )
@@ -247,6 +255,7 @@ class ContextSpec:
         include_daily_env: bool = True,
         include_priority_senders: bool = True,
         include_quick_send_images: bool = True,
+        include_user_fact_index: bool = True,
     ) -> ContextSpec:
         idle_conv = conversation_id or (f"idle-event:{event_id}" if event_id else "idle-event")
         turns = tuple(synthetic_turns)
@@ -276,6 +285,7 @@ class ContextSpec:
             include_daily_env=include_daily_env,
             include_priority_senders=include_priority_senders,
             include_quick_send_images=include_quick_send_images,
+            include_user_fact_index=include_user_fact_index,
         )
 
 
@@ -365,6 +375,15 @@ class ContextBuilder:
             for row in current_records
             if isinstance(row.get("message_id"), str) and row.get("message_id")
         }
+
+        idle_since_at: str | None = None
+        if spec.mode == "idle" and self.memory_store is not None and self.time_scheduler is not None:
+            idle_since_at = await run_db(
+                self.time_scheduler.last_completed_idle_at,
+                spec.account_id,
+                db=self.time_scheduler.db,
+                lock=self.time_scheduler._lock,
+            )
 
         if self.memory_store is not None:
             memory_store = self.memory_store
@@ -528,6 +547,19 @@ class ContextBuilder:
                         account_id=spec.account_id,
                         limit=10,
                     )
+                fact_keys_local = (
+                    memory_store.fact_key_index(account_id=spec.account_id, limit=40)
+                    if spec.include_user_fact_index
+                    else []
+                )
+                idle_snapshot_local = (
+                    memory_store.idle_curation_snapshot(
+                        account_id=spec.account_id,
+                        since_at=idle_since_at,
+                    )
+                    if spec.mode == "idle"
+                    else None
+                )
                 return (
                     enr_cur,
                     enr_qt,
@@ -536,6 +568,8 @@ class ContextBuilder:
                     global_local,
                     priority_local,
                     quick_local,
+                    fact_keys_local,
+                    idle_snapshot_local,
                 )
 
             (
@@ -546,6 +580,8 @@ class ContextBuilder:
                 global_timeline,
                 priority_sender_references,
                 quick_send_images,
+                user_fact_keys,
+                idle_snapshot,
             ) = await run_db(
                 _load_memory_context,
                 db=memory_store.db,
@@ -559,6 +595,8 @@ class ContextBuilder:
             global_timeline = []
             priority_sender_references = []
             quick_send_images = []
+            user_fact_keys = []
+            idle_snapshot = None
 
         priority_sender_ids = [
             str(profile["sender_id"])
@@ -568,8 +606,23 @@ class ContextBuilder:
         activity_chat_ids = [
             str(act["conversation_id"])
             for profile in priority_sender_references
-            for act in (profile.get("other_chat_activity") or ())
+            for act in _seq_value(profile.get("other_chat_activity"))
             if isinstance(act, Mapping) and isinstance(act.get("conversation_id"), str)
+        ]
+        delta_chat_ids = [
+            str(row["conversation_id"])
+            for row in _seq_value((idle_snapshot or {}).get("by_conversation"))
+            if isinstance(row, Mapping) and row.get("conversation_id")
+        ]
+        consolidation = (idle_snapshot or {}).get("consolidation_candidates")
+        bloated_sender_ids = [
+            str(row["sender_id"])
+            for row in (
+                _seq_value(consolidation.get("bloated_senders"))
+                if isinstance(consolidation, Mapping)
+                else ()
+            )
+            if isinstance(row, Mapping) and row.get("sender_id")
         ]
 
         identities = await self._resolve_identities(
@@ -580,7 +633,12 @@ class ContextBuilder:
             other=other,
             global_timeline=global_timeline,
             priority_sender_ids=priority_sender_ids,
-            extra_identifiers=(*spec.extra_identifiers, *activity_chat_ids),
+            extra_identifiers=(
+                *spec.extra_identifiers,
+                *activity_chat_ids,
+                *delta_chat_ids,
+                *bloated_sender_ids,
+            ),
         )
 
         daily: str | None = None
@@ -617,6 +675,15 @@ class ContextBuilder:
             for index, item in enumerate(spec.observations)
         )
         turns = (*obs_turns, *spec.synthetic_turns)
+        if spec.mode == "idle" and idle_snapshot is not None:
+            trusted_ids = {spec.account_id, *priority_sender_ids}
+            delta_block = _format_idle_curation_snapshot(idle_snapshot, identities, trusted_ids)
+            turns = tuple(
+                replace(turn, text=f"{turn.text}\n\n{delta_block}")
+                if turn.sender_origin == "idle_task"
+                else turn
+                for turn in turns
+            )
 
         history_origin = (
             "cross_session_history" if spec.mode == "cross_session" else "stored_other_chat"
@@ -663,6 +730,7 @@ class ContextBuilder:
             quick_send_images=tuple(
                 item for item in quick_send_images if isinstance(item, Mapping)
             ),
+            user_fact_keys=tuple(user_fact_keys),
             daily_prompt_context=daily,
             delivery_notices=spec.delivery_notices,
             scheduled_task=spec.scheduled_task,
@@ -767,3 +835,123 @@ class ContextBuilder:
             )
             identities = apply_sender_remarks(identities, remarks)
         return identities
+
+
+def _format_local_minute(iso_stamp: object) -> str:
+    if not isinstance(iso_stamp, str) or not iso_stamp:
+        return "首次记录"
+    try:
+        parsed = datetime.fromisoformat(iso_stamp)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return iso_stamp[:16]
+
+
+def _int_value(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _seq_value(value: object) -> Sequence[object]:
+    return value if isinstance(value, (list, tuple)) else ()
+
+
+def _format_idle_curation_snapshot(
+    snapshot: Mapping[str, object],
+    identities: Mapping[str, ContactIdentity],
+    trusted_ids: set[str],
+) -> str:
+    """Format an objective per-idle delta and memory inventory block."""
+    since_label = _format_local_minute(snapshot.get("since_at"))
+    new_count = _int_value(snapshot.get("new_human_messages"))
+    unannotated = _int_value(snapshot.get("unannotated_new_messages"))
+    counts = snapshot.get("active_counts")
+    counts_map = counts if isinstance(counts, Mapping) else {}
+    stale_events = _int_value(counts_map.get("event_book_stale_72h"))
+    candidates = snapshot.get("consolidation_candidates")
+    cand_map = candidates if isinstance(candidates, Mapping) else {}
+    bloated_senders = [
+        item for item in _seq_value(cand_map.get("bloated_senders")) if isinstance(item, Mapping)
+    ]
+    excess_fact_keys = [
+        str(k) for k in _seq_value(cand_map.get("excess_fact_keys")) if isinstance(k, str) and k
+    ]
+    needs_consolidation = bool(bloated_senders or excess_fact_keys)
+
+    chat_parts: list[str] = []
+    for item in _seq_value(snapshot.get("by_conversation")):
+        if not isinstance(item, Mapping):
+            continue
+        cid = str(item.get("conversation_id") or "")
+        cnt = _int_value(item.get("count"))
+        if not cid or cnt <= 0:
+            continue
+        label = _safe_identity_name(cid, identities.get(cid), trusted_ids)
+        kind = "群聊" if is_group_conversation(cid) else "私聊"
+        latest = _format_local_minute(item.get("latest_at"))
+        chat_parts.append(f"{kind}「{label}」({cid}) {cnt} 条 [最新 {latest}]")
+
+    bloat_parts: list[str] = []
+    if bloated_senders:
+        sender_labels = []
+        for item in bloated_senders:
+            sid = str(item.get("sender_id") or "")
+            cnt = _int_value(item.get("count"))
+            if not sid or cnt <= 0:
+                continue
+            label = _safe_identity_name(sid, identities.get(sid), trusted_ids)
+            sender_labels.append(f"{label}({sid}) {cnt} 条")
+        if sender_labels:
+            bloat_parts.append("人物资料碎片≥8条：" + "、".join(sender_labels))
+    if excess_fact_keys:
+        fact_total = _int_value(cand_map.get("active_fact_count"), len(excess_fact_keys))
+        fact_limit = _int_value(cand_map.get("fact_threshold"), 20)
+        bloat_parts.append(
+            f"账号事实≥{fact_limit}条（当前 {fact_total} 条，较久未更新 key："
+            + "、".join(excess_fact_keys)
+            + "）"
+        )
+
+    if new_count == 0 and stale_events == 0 and not needs_consolidation:
+        verdict = (
+            "当前判定：真·空窗期（无新增真人消息、无超 72h 过期普通事件且无碎片堆积），"
+            "可直接调用 record_idle_activity 跳过复核。"
+        )
+    elif new_count == 0 and stale_events == 0 and needs_consolidation:
+        verdict = (
+            "当前判定：无新增消息但存在长期记忆碎片堆积（禁止零工具直接跳过）；"
+            "请按 docs/idle-sop/memory-audit.md 对提示对象做 N 合 1 合并剪枝。"
+        )
+    else:
+        verdict = (
+            "当前判定：存在增量或待复核事项（禁止零工具直接跳过）；"
+            "请用 query_wechat_messages 核查新增会话后再按需维护记忆或自我细则。"
+        )
+    lines = [
+        "【距上次空闲整理的客观增量盘点】",
+        f"上次完成整理：{since_label}；之后新增真人消息：{new_count} 条（其中未写批注 {unannotated} 条）。",
+        "新增消息分布：" + ("；".join(chat_parts) if chat_parts else "无。"),
+        (
+            "当前长期库存："
+            f"annotations={_int_value(counts_map.get('annotations'))} / "
+            f"sender_memories={_int_value(counts_map.get('sender_memories'))} / "
+            f"entity_terms={_int_value(counts_map.get('entity_terms'))} / "
+            f"user_facts={_int_value(counts_map.get('user_facts'))} / "
+            f"event_book={_int_value(counts_map.get('event_book_active'))}"
+            f"（超 72h 未更新普通事件 {stale_events} 条）。"
+        ),
+    ]
+    if bloat_parts:
+        lines.append("碎片合并预警：" + "；".join(bloat_parts) + "。")
+    lines.append(verdict)
+    return "\n".join(lines)

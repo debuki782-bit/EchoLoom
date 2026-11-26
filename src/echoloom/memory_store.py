@@ -370,6 +370,26 @@ class MemoryStore:
             conversation_id=conversation_id,
         )
 
+    def message_conversation(
+        self, *, message_id: str, account_id: str
+    ) -> str | None:
+        return self.messages.message_conversation(
+            message_id=message_id,
+            account_id=account_id,
+        )
+
+    def idle_curation_snapshot(
+        self, *, account_id: str, since_at: str | None
+    ) -> dict[str, object]:
+        snapshot = self.messages.idle_curation_snapshot(
+            account_id=account_id,
+            since_at=since_at,
+        )
+        snapshot["consolidation_candidates"] = self.knowledge.memory_consolidation_candidates(
+            account_id=account_id,
+        )
+        return snapshot
+
     def message_exists_for_sender(self, account_id: str, sender_id: str) -> bool:
         return self.messages.message_exists_for_sender(account_id, sender_id)
 
@@ -809,6 +829,24 @@ class MemoryStore:
 
     def search_facts(self, *, account_id: str, query: str, limit: int = 8) -> list[dict]:
         return self.knowledge.search_facts(account_id=account_id, query=query, limit=limit)
+
+    def fact_key_index(self, *, account_id: str, limit: int = 40) -> list[str]:
+        return self.knowledge.fact_key_index(account_id=account_id, limit=limit)
+
+    def memory_consolidation_candidates(
+        self,
+        *,
+        account_id: str,
+        sender_threshold: int = 8,
+        fact_threshold: int = 20,
+        limit: int = 5,
+    ) -> dict[str, object]:
+        return self.knowledge.memory_consolidation_candidates(
+            account_id=account_id,
+            sender_threshold=sender_threshold,
+            fact_threshold=fact_threshold,
+            limit=limit,
+        )
 
     def delete_fact(self, *, account_id: str, fact_id: str, actor_id: str = "agent") -> None:
         self.knowledge.delete_fact(account_id=account_id, fact_id=fact_id, actor_id=actor_id)

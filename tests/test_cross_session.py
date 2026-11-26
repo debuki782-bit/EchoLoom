@@ -287,3 +287,20 @@ def test_restart_interrupts_leftover_running_delegation_tasks(tmp_path):
     assert row_again["state"] == "interrupted"
     assert row_again["finished_at"] == row["finished_at"]
     store.close()
+
+
+def test_query_messages_supports_space_separated_keywords(tmp_path):
+    store = MemoryStore(tmp_path / "memory.sqlite3")
+    _archive(store, "bot", "room@chatroom", "member", "近期有降价风险，特别是内存和固态硬盘")
+    _archive(store, "bot", "room@chatroom", "member", "今天只聊天气")
+    service = CrossSessionService(store)
+
+    res = service.query_messages(
+        account_id="bot",
+        conversation_id="room@chatroom",
+        query="降价 内存 固态",
+    )
+    assert res["status"] == "completed"
+    assert res["matched_count"] == 1
+    assert "内存" in res["messages"][0]["body_text"]
+    store.close()

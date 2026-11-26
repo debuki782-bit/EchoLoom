@@ -750,10 +750,50 @@ def build_runtime_bundle(
     )
 
     async def run_idle_event(event_id: str, event_number: int, model_id: str) -> None:
+        dream_notes: list[str] = []
+        if services.episode_memory is not None:
+            default_profile = profile_config.profiles[profile_config.default_profile]
+            try:
+                dream_results = await services.episode_memory.consolidate_bloated_conversations(
+                    account_id=account,
+                    threshold=12,
+                    max_keep=8,
+                    max_conversations=1,
+                    profile_id=default_profile.profile_id,
+                    daily_budget_microusd=default_profile.daily_budget_microusd,
+                    text_budget_microusd=default_profile.text_budget_microusd,
+                    image_read_budget_microusd=default_profile.image_read_budget_microusd,
+                    image_generation_budget_microusd=(
+                        default_profile.image_generation_budget_microusd
+                    ),
+                )
+                for item in dream_results:
+                    if item.get("status") == "consolidated":
+                        dream_notes.append(
+                            f"会话 {item['conversation_id']} 事件记忆已合并："
+                            f"{item['before']} -> {item['after']} 条"
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - dreaming must not block idle curation
+                logger.warning(
+                    "event=episode_dreaming_failed error_type=%s",
+                    type(exc).__name__,
+                )
+
         built = await services.context_builder.build(
             ContextSpec.for_idle(account_id=account, event_id=event_id),
         )
         window = built.context
+        if dream_notes and window.turns:
+            note_block = "\n\n【离线事件记忆整合回执】\n" + "\n".join(dream_notes)
+            window = replace(
+                window,
+                turns=(
+                    replace(window.turns[0], text=window.turns[0].text + note_block),
+                    *window.turns[1:],
+                ),
+            )
         started_at = datetime.now(UTC)
         model = services.idle_tools.bind(account, event_id, event_number, model_id, started_at)
         scope = ExitStack()

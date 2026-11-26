@@ -1200,3 +1200,81 @@ def test_toolset_modules_have_no_hardcoded_hook_endpoints():
         source = path.read_text("utf-8")
         for endpoint in endpoints:
             assert endpoint not in source, (path.name, endpoint)
+
+
+def test_idle_mode_unlocks_historical_notes_user_facts_and_cross_chat_search(tmp_path):
+    async def scenario():
+        (tmp_path / "data").mkdir()
+        memory = MemoryStore(tmp_path / "memory.sqlite3")
+        hist_room = memory.archive_message(
+            account_id="bot", conversation_id="room@chatroom", sender_id="member",
+            raw_envelope={"msg": "群里的历史消息"}, source_record={"msg": "群里的历史消息"},
+            body_text="群里的历史消息",
+        )
+        other_acc = memory.archive_message(
+            account_id="other_bot", conversation_id="other_room@chatroom", sender_id="member",
+            raw_envelope={"msg": "别账号消息"}, source_record={"msg": "别账号消息"},
+            body_text="别账号消息",
+        )
+        tools = WeChatTools(tmp_path, "bot", "room@chatroom", None, None, None,
+                            SystemClock(), memory_store=memory)
+
+        # Idle turn where queried message_id is NOT in the 100-msg window mapping
+        idle_token = memory_context.set({
+            "account_id": "bot",
+            "conversation_id": "idle-event:idle_123",
+            "message_id": "",
+            "is_idle_event": True,
+            "message_ids": (),
+            "message_conversations": {},
+            "allowed_conversations": ("idle-event:idle_123",),
+        })
+        try:
+            notes = await tools.add_message_notes([
+                {"message_id": hist_room.message_id, "content": "窗口外历史消息也可正常补注"},
+                {"message_id": other_acc.message_id, "content": "跨账号必须拒绝"},
+            ])
+            assert [r["status"] for r in notes["results"]] == ["saved", "unavailable"]
+
+            # remember_user_fact in Idle requires explicit source_message_id
+            missing_src = await tools.remember_user_fact("k1", "没有来源")
+            assert missing_src["status"] == "rejected"
+            assert missing_src["reason"] == "source_message_id_required_in_idle"
+
+            saved_fact = await tools.remember_user_fact(
+                "k1", "由Idle锚定真实消息写入", source_message_id=hist_room.message_id
+            )
+            assert saved_fact["status"] == "saved"
+            assert saved_fact["source_message_id"] == hist_room.message_id
+
+            # Idle search_message_notes searches across all account conversations
+            found_notes = await tools.search_message_notes("窗口外 补注")
+            assert len(found_notes["notes"]) == 1
+        finally:
+            memory_context.reset(idle_token)
+
+        # Regular chat must still block cross-room notes and cross-room fact anchoring
+        chat_token = memory_context.set({
+            "account_id": "bot",
+            "conversation_id": "wxid_dm",
+            "message_id": "dm_msg",
+            "is_idle_event": False,
+            "message_ids": ("dm_msg",),
+            "message_conversations": {"dm_msg": "wxid_dm"},
+            "allowed_conversations": ("wxid_dm",),
+        })
+        try:
+            cross_note = await tools.add_message_notes([
+                {"message_id": hist_room.message_id, "content": "越权注群消息"},
+            ])
+            assert cross_note["results"][0]["status"] == "unavailable"
+            cross_fact = await tools.remember_user_fact(
+                "k2", "越权事实", source_message_id=hist_room.message_id
+            )
+            assert cross_fact["status"] == "rejected"
+        finally:
+            memory_context.reset(chat_token)
+            tools.db.close()
+            memory.close()
+
+    asyncio.run(scenario())

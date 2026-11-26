@@ -44,24 +44,47 @@ class MemoryToolset:
     def room(self) -> str:
         return active_conversation.get() or self._default_room
 
-    async def remember_user_fact(self, fact_key: str, content: str) -> dict:
+    async def remember_user_fact(
+        self, fact_key: str, content: str, source_message_id: str = ""
+    ) -> dict:
         ctx = memory_context.get()
         if not self.memory_store or not ctx:
             return {"status": "unavailable"}
+        is_idle = bool(ctx.get("is_idle_event"))
+        requested_source = source_message_id.strip() if isinstance(source_message_id, str) else ""
+        default_source = str(ctx.get("message_id") or "").strip()
+        target_source = requested_source or default_source
+        if not target_source:
+            reason = (
+                "source_message_id_required_in_idle"
+                if is_idle
+                else "source_message_unavailable"
+            )
+            return {"status": "rejected", "reason": reason}
+        if not is_idle and requested_source and requested_source != default_source:
+            visible_ids = ctx.get("message_ids") or ()
+            if (
+                requested_source not in visible_ids
+                and self._message_conversation(ctx, requested_source) is None
+            ):
+                return {"status": "rejected", "reason": "source_message_outside_conversation"}
         try:
             fact_id = self.memory_store.remember_fact(
-                account_id=ctx["account_id"],
+                account_id=str(ctx["account_id"]),
                 fact_key=fact_key,
                 content=content,
-                source_message_id=ctx["message_id"],
+                source_message_id=target_source,
             )
             return {
                 "status": "saved",
                 "fact_id": fact_id,
+                "source_message_id": target_source,
                 "trust": "untrusted_memory",
             }
-        except (ValueError, KeyError):
-            return {"status": "rejected"}
+        except ValueError:
+            return {"status": "rejected", "reason": "fact_key_or_content_invalid"}
+        except KeyError:
+            return {"status": "rejected", "reason": "source_message_unavailable"}
 
     async def search_user_memory(self, query: str) -> dict:
         ctx = memory_context.get()
@@ -81,11 +104,12 @@ class MemoryToolset:
         ctx = memory_context.get()
         if not self.memory_store or not ctx:
             return {"notes": []}
+        scope_conversation = None if ctx.get("is_idle_event") else self.room
         try:
             return {
                 "notes": self.memory_store.search_notes(
                     account_id=ctx["account_id"],
-                    conversation_id=self.room,
+                    conversation_id=scope_conversation,
                     query=query,
                 ),
             }
@@ -471,11 +495,20 @@ class MemoryToolset:
         requested: str | None = None,
     ) -> str | None:
         mapping = context.get("message_conversations")
-        conversation = (
-            requested or mapping.get(message_id)
-            if isinstance(mapping, dict)
-            else requested
-        )
+        mapped = mapping.get(message_id) if isinstance(mapping, dict) else None
+        if context.get("is_idle_event"):
+            actual = mapped
+            if actual is None and self.memory_store is not None:
+                actual = self.memory_store.message_conversation(
+                    message_id=message_id,
+                    account_id=str(context["account_id"]),
+                )
+            if actual is None:
+                return None
+            if requested and requested != actual:
+                return None
+            return str(actual)
+        conversation = requested or mapped
         conversation = conversation or self.room
         return conversation if self._conversation_allowed(context, conversation) else None
 

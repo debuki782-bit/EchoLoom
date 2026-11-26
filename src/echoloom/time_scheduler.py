@@ -376,6 +376,16 @@ class TimeScheduler:
         return [str(row[0]) + ("；成功工具调用：" + str(row[1]) if row[1] != "[]" else "")
                 for row in rows]
 
+    def last_completed_idle_at(self, account_id: str) -> str | None:
+        """Return the completion timestamp of the latest completed idle event, if any."""
+        with self._lock:
+            row = self.db.execute(
+                "SELECT finished_at FROM idle_activity_summaries WHERE account_id=? "
+                "AND outcome='completed' ORDER BY finished_at DESC,activity_id DESC LIMIT 1",
+                (account_id,),
+            ).fetchone()
+        return str(row[0]) if row is not None and row[0] else None
+
     def has_idle_activity(self, account_id: str, event_id: str) -> bool:
         with self._lock:
             row = self.db.execute(

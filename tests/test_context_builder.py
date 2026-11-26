@@ -557,3 +557,43 @@ def test_layer4_context_modules_have_no_hardcoded_hook_endpoints():
             "/QueryDB/status",
         ):
             assert endpoint not in source, (name, endpoint)
+
+
+def test_idle_context_builder_injects_objective_delta_snapshot(tmp_path: Path):
+    """Idle ContextBuilder must quantify inbound delta and active memory counts objectively."""
+    store, scheduler = _seed_store(tmp_path)
+    builder = ContextBuilder(
+        store,
+        resolve_contact=lambda uid: ContactIdentity(uid, user_name=uid, nickname=uid),
+        time_scheduler=scheduler,
+    )
+    try:
+        # First idle sees seeded inbound messages after previous idle finished at 2026-10-29T00:00Z
+        built_with_delta = asyncio.run(
+            builder.build(ContextSpec.for_idle(account_id="wxid_bot001", event_id="idle_delta_1"))
+        )
+        assert len(built_with_delta.context.turns) == 1
+        task_text = built_with_delta.context.turns[0].text
+        assert "【距上次空闲整理的客观增量盘点】" in task_text
+        assert "存在增量或待复核事项" in task_text
+        assert "sender_memories=1" in task_text
+
+        # Record a completed idle AFTER all current messages -> next idle becomes true empty window
+        future_stamp = datetime.now(UTC) + timedelta(minutes=1)
+        scheduler.record_idle_activity(
+            account_id="wxid_bot001",
+            event_id="idle_delta_1",
+            event_number=2,
+            model_id="gpt-6-luna",
+            summary="已检查增量",
+            started_at=future_stamp,
+            finished_at=future_stamp,
+        )
+        built_empty = asyncio.run(
+            builder.build(ContextSpec.for_idle(account_id="wxid_bot001", event_id="idle_delta_2"))
+        )
+        empty_text = built_empty.context.turns[0].text
+        assert "新增真人消息：0 条" in empty_text
+        assert "当前判定：真·空窗期" in empty_text
+    finally:
+        store.close()

@@ -174,6 +174,7 @@ class ContextWindow:
     identities: Mapping[str, ContactIdentity] = field(default_factory=dict, repr=False)
     priority_sender_references: tuple[Mapping[str, object], ...] = field(default=(), repr=False)
     quick_send_images: tuple[Mapping[str, object], ...] = field(default=(), repr=False)
+    user_fact_keys: tuple[str, ...] = field(default=(), repr=False)
     daily_prompt_context: str | None = field(default=None, repr=False)
     delivery_notices: tuple[str, ...] = field(default=(), repr=False)
     scheduled_task: str | None = field(default=None, repr=False)
@@ -364,6 +365,16 @@ class ContextWindow:
                     "\n\n【当前可快速发送的图片】\n"
                     + "\n".join(image_lines)
                     + "\n需要发送时可在 commit_agent_turn 传入精确 reply_image_id（支持纯发表情包，或与 reply_text/reply_messages 组合发送），也可单独调用 send_wechat_image。"
+                )
+        if self.user_fact_keys:
+            clean_keys = [
+                cleaned for key in self.user_fact_keys if (cleaned := _one_line(key))
+            ]
+            if clean_keys:
+                result += (
+                    "\n\n【账号级长期事实目录（仅索引，未载入正文；相关时按需调用 search_user_memory）】\n"
+                    + "已存 fact_key："
+                    + "、".join(clean_keys)
                 )
         return result
 
@@ -909,6 +920,12 @@ def fit_context_window(window: ContextWindow, *, max_bytes: int) -> ContextWindo
         elif current.recent_other_turns:
             current = replace(current, recent_other_turns=current.recent_other_turns[1:])
             omitted += 1
+        elif current.user_fact_keys:
+            keep_keys = len(current.user_fact_keys) // 2
+            current = replace(
+                current,
+                user_fact_keys=current.user_fact_keys[:keep_keys] if keep_keys else (),
+            )
         elif current.history_turns:
             current = replace(current, history_turns=current.history_turns[1:])
             omitted += 1

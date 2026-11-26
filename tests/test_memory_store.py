@@ -506,3 +506,69 @@ def test_direct_repo_access_and_facade_parity(tmp_path):
     assert MemoryStore._message_dict(row) == MessageRepo.message_dict(row)
     assert MemoryStore._message_dict(row)["source_is_group"] is True
     store.close()
+
+
+def test_tokenized_fact_and_note_search_handles_spaced_queries_and_cross_chat(tmp_path):
+    store = MemoryStore(tmp_path / "memory.sqlite3")
+    _, ev_room = _callback("wxid_member:\n支持三开多任务分屏的平板设备讨论")
+    archived_room = store.archive_message(
+        account_id=ev_room.account_id,
+        conversation_id=ev_room.conversation_id,
+        sender_id=ev_room.sender_id,
+        raw_envelope=json.loads(ev_room.raw_envelope_json),
+        body_text=ev_room.text,
+    )
+    archived_dm = store.archive_message(
+        account_id=ev_room.account_id,
+        conversation_id="wxid_friend",
+        sender_id="wxid_friend",
+        raw_envelope={"msg": "周末吃火锅"},
+        body_text="周末吃火锅",
+    )
+    store.remember_fact(
+        account_id=ev_room.account_id,
+        fact_key="master_interest_chess",
+        content="主人近期沉迷国际象棋战术",
+        source_message_id=archived_room.message_id,
+    )
+    store.remember_fact(
+        account_id=ev_room.account_id,
+        fact_key="tablet_usage",
+        content="拥有支持三开分屏的平板类设备",
+        source_message_id=archived_room.message_id,
+    )
+    store.add_note(
+        account_id=ev_room.account_id,
+        message_id=archived_room.message_id,
+        content="夜间多屏网页浏览线索",
+    )
+    store.add_note(
+        account_id=ev_room.account_id,
+        message_id=archived_dm.message_id,
+        content="私聊约饭线索",
+    )
+
+    # Spaced AND match across non-adjacent words
+    assert store.search_facts(account_id=ev_room.account_id, query="平板 设备")[0]["fact_key"] == "tablet_usage"
+    # Multi-word OR ranked fallback when synonym is absent ("国象" vs "国际象棋")
+    assert store.search_facts(account_id=ev_room.account_id, query="国际象棋 国象")[0]["fact_key"] == "master_interest_chess"
+    # Room-scoped search sees only room note; account-wide (conversation_id=None) sees both
+    room_hits = store.search_notes(
+        account_id=ev_room.account_id,
+        conversation_id=ev_room.conversation_id,
+        query="平板 浏览",
+    )
+    assert len(room_hits) == 1
+    assert store.search_notes(
+        account_id=ev_room.account_id,
+        conversation_id=ev_room.conversation_id,
+        query="约饭",
+    ) == []
+    all_hits = store.search_notes(
+        account_id=ev_room.account_id,
+        conversation_id=None,
+        query="约饭 线索",
+    )
+    assert len(all_hits) == 1
+    assert all_hits[0]["conversation_id"] == "wxid_friend"
+    store.close()

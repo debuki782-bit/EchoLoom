@@ -34,6 +34,11 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _query_tokens(query: str, *, max_terms: int = 6) -> list[str]:
+    """Split a bounded search string into unique non-empty keywords."""
+    return list(dict.fromkeys(part for part in query.split() if part))[:max_terms]
+
+
 class KnowledgeRepo:
     """Versioned annotations, facts, entity dictionary, sender profiles/tags, and audit log."""
 
@@ -333,23 +338,72 @@ class KnowledgeRepo:
             notes_by_message.setdefault(str(row["message_id"]), []).append(dict(row))
         return notes_by_message
 
+    def _search_tokenized(
+        self,
+        *,
+        select_columns: str,
+        from_where_base: str,
+        base_params: Sequence[object],
+        haystack_expr: str,
+        order_expr: str,
+        query: str,
+        limit: int,
+    ) -> list[dict]:
+        """Run multi-keyword AND query first, then rank multi-word OR matches on zero AND hits."""
+        tokens = _query_tokens(query)
+        if not tokens:
+            return []
+        and_sql = " AND ".join(f"{haystack_expr} LIKE ? ESCAPE '\\'" for _ in tokens)
+        and_params = [f"%{_like_escape(tok)}%" for tok in tokens]
+        rows = self.db.execute(
+            f"SELECT {select_columns} {from_where_base} AND ({and_sql}) "
+            f"ORDER BY {order_expr} LIMIT ?",
+            (*base_params, *and_params, limit),
+        ).fetchall()
+        if rows or len(tokens) < 2:
+            return [dict(row) for row in rows]
+        broad = [tok for tok in tokens if len(tok) >= 2] or tokens
+        score_expr = " + ".join(
+            f"(CASE WHEN {haystack_expr} LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)"
+            for _ in broad
+        )
+        or_sql = " OR ".join(f"{haystack_expr} LIKE ? ESCAPE '\\'" for _ in broad)
+        patterns = [f"%{_like_escape(tok)}%" for tok in broad]
+        rows = self.db.execute(
+            f"SELECT {select_columns} {from_where_base} AND ({or_sql}) "
+            f"ORDER BY ({score_expr}) DESC, {order_expr} LIMIT ?",
+            (*base_params, *patterns, *patterns, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def search_notes(
-        self, *, account_id: str, conversation_id: str, query: str, limit: int = 8
+        self, *, account_id: str, conversation_id: str | None, query: str, limit: int = 8
     ) -> list[dict[str, str]]:
         query = _bounded_text(query, MAX_QUERY_CHARS).casefold()
         if not 1 <= limit <= 20:
             raise ValueError("limit out of range")
-        needle = f"%{_like_escape(query)}%"
-        rows = self.db.execute(
-            "SELECT a.note_id,a.content,a.message_id,a.author_id,a.source,a.trust_label,"
-            "a.version,s.captured_at FROM annotations a JOIN source_messages s "
-            "ON s.message_id=a.message_id WHERE a.account_id=? AND s.account_id=? "
-            "AND s.conversation_id=? AND s.deleted_at IS NULL AND s.expires_at>? "
-            "AND a.state='active' AND (s.body_text LIKE ? ESCAPE '\\' "
-            "OR a.content LIKE ? ESCAPE '\\') ORDER BY a.updated_at DESC LIMIT ?",
-            (account_id, account_id, conversation_id, _now(), needle, needle, limit),
+        where_chat = "AND s.conversation_id=? " if conversation_id is not None else ""
+        base_params: list[object] = [account_id, account_id]
+        if conversation_id is not None:
+            base_params.append(conversation_id)
+        base_params.append(_now())
+        return self._search_tokenized(
+            select_columns=(
+                "a.note_id,a.content,a.message_id,s.conversation_id,"
+                "a.author_id,a.source,a.trust_label,a.version,s.captured_at"
+            ),
+            from_where_base=(
+                "FROM annotations a JOIN source_messages s ON s.message_id=a.message_id "
+                "WHERE a.account_id=? AND s.account_id=? "
+                + where_chat
+                + "AND s.deleted_at IS NULL AND s.expires_at>? AND a.state='active'"
+            ),
+            base_params=base_params,
+            haystack_expr="(coalesce(s.body_text,'') || ' ' || coalesce(a.content,''))",
+            order_expr="a.updated_at DESC",
+            query=query,
+            limit=limit,
         )
-        return [dict(row) for row in rows]
 
     def remember_fact(
         self,
@@ -405,14 +459,17 @@ class KnowledgeRepo:
         query = _bounded_text(query, MAX_QUERY_CHARS).casefold()
         if not 1 <= limit <= 20:
             raise ValueError("limit out of range")
-        rows = self.db.execute(
-            "SELECT fact_id,fact_key,content,source_message_id,author_id,trust_label,version "
-            "FROM user_facts WHERE account_id=? AND state='active' AND "
-            "(fact_key LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\') "
-            "ORDER BY updated_at DESC LIMIT ?",
-            (account_id, f"%{_like_escape(query)}%", f"%{_like_escape(query)}%", limit),
+        return self._search_tokenized(
+            select_columns=(
+                "fact_id,fact_key,content,source_message_id,author_id,trust_label,version"
+            ),
+            from_where_base="FROM user_facts WHERE account_id=? AND state='active'",
+            base_params=(account_id,),
+            haystack_expr="(coalesce(fact_key,'') || ' ' || coalesce(content,''))",
+            order_expr="updated_at DESC",
+            query=query,
+            limit=limit,
         )
-        return [dict(row) for row in rows]
 
     def delete_fact(self, *, account_id: str, fact_id: str, actor_id: str = "agent") -> None:
         now = _now()
@@ -437,6 +494,64 @@ class KnowledgeRepo:
                 row["version"],
                 now,
             )
+
+    def fact_key_index(self, *, account_id: str, limit: int = 40) -> list[str]:
+        """Return most-recently-updated active user_facts keys as a compact lookup index."""
+        if not 1 <= limit <= 100:
+            raise ValueError("limit out of range")
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT fact_key FROM user_facts WHERE account_id=? AND state='active' "
+                "ORDER BY updated_at DESC, fact_id DESC LIMIT ?",
+                (account_id, limit),
+            ).fetchall()
+        return list(dict.fromkeys(str(row["fact_key"]) for row in rows if row["fact_key"]))
+
+    def memory_consolidation_candidates(
+        self,
+        *,
+        account_id: str,
+        sender_threshold: int = 8,
+        fact_threshold: int = 20,
+        limit: int = 5,
+    ) -> dict[str, object]:
+        """Identify fragmented sender_memories or oversized user_facts via deterministic SQL."""
+        if sender_threshold < 2 or fact_threshold < 2 or not 1 <= limit <= 20:
+            raise ValueError("consolidation thresholds out of range")
+        with self._lock:
+            sender_rows = self.db.execute(
+                "SELECT sender_id, COUNT(*) AS cnt FROM sender_memories "
+                "WHERE account_id=? AND state='active' "
+                "GROUP BY sender_id HAVING COUNT(*) >= ? "
+                "ORDER BY cnt DESC, sender_id LIMIT ?",
+                (account_id, sender_threshold, limit),
+            ).fetchall()
+            fact_count = int(
+                self.db.execute(
+                    "SELECT COUNT(*) FROM user_facts WHERE account_id=? AND state='active'",
+                    (account_id,),
+                ).fetchone()[0]
+            )
+            excess_fact_rows = (
+                self.db.execute(
+                    "SELECT fact_key FROM user_facts WHERE account_id=? AND state='active' "
+                    "ORDER BY updated_at ASC, fact_id ASC LIMIT ?",
+                    (account_id, limit),
+                ).fetchall()
+                if fact_count >= fact_threshold
+                else []
+            )
+        return {
+            "bloated_senders": [
+                {"sender_id": str(row["sender_id"]), "count": int(row["cnt"])}
+                for row in sender_rows
+            ],
+            "active_fact_count": fact_count,
+            "fact_threshold": fact_threshold,
+            "excess_fact_keys": [
+                str(row["fact_key"]) for row in excess_fact_rows if row["fact_key"]
+            ],
+        }
 
     def upsert_entity(
         self, *, account_id: str, term: str, explanation: str, actor_id: str = "agent"
