@@ -4,11 +4,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from wechat_agent.context import build_hook_context
-from wechat_agent.hook_contract import parse_callback
-from wechat_agent.memory_store import MemoryStore, StoredMessage
-from wechat_agent.repos import KnowledgeRepo, MediaRepo, MessageRepo
-from wechat_agent.repos import StoredMessage as RepoStoredMessage
+from echoloom.context import build_hook_context
+from echoloom.hook_contract import parse_callback
+from echoloom.memory_store import MemoryStore, StoredMessage
+from echoloom.repos import KnowledgeRepo, MediaRepo, MessageRepo
+from echoloom.repos import StoredMessage as RepoStoredMessage
 
 
 def _callback(body="wxid_member:\n原始消息正文"):

@@ -4,8 +4,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from wechat_agent.conversation_scheduler import ConversationScheduler
-from wechat_agent.hook_contract import HookObservation
+from echoloom.conversation_scheduler import ConversationScheduler
+from echoloom.hook_contract import HookObservation
 
 
 def observed(text: str, *, conversation: str = "room@chatroom", tick: int = 1,
@@ -112,7 +112,7 @@ def test_duplicate_identity_checks_payload_and_retry_is_bounded(tmp_path, caplog
     assert scheduler.enqueue(changed)[0] == "source_id_conflict"
 
     base = datetime.now(UTC)
-    caplog.set_level("ERROR", logger="wechat_agent.conversation_scheduler")
+    caplog.set_level("ERROR", logger="echoloom.conversation_scheduler")
     for attempt in range(scheduler.ALERT_ATTEMPTS_THRESHOLD + 2):
         claim_now = base + timedelta(seconds=attempt * 400 + 10)
         batch = scheduler.claim_ready_batch(now=claim_now)

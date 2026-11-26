@@ -10,24 +10,24 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
-from wechat_agent.runtime_contract import (
+from echoloom.runtime_contract import (
     BudgetExhausted as AdkBudgetExhausted,
     ModelCallsLimitExceeded as LlmCallsLimitExceededError,
     ModelProviderUnavailable,
 )
 
-from wechat_agent.adk_runner import ScopedAdkRunner
-from wechat_agent.contacts import ContactIdentity
-from wechat_agent.context import build_hook_context
-from wechat_agent.context_assembler import MessageContextAssembler
-from wechat_agent.hook_contract import HookObservation, parse_callback
-from wechat_agent.hook_outbound import HookSendResult, HookTextSender
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.models import ConversationKey
-from wechat_agent.pilot import Pilot, _current_message_id
-from wechat_agent.rich_message import normalize_message
-from wechat_agent.time_scheduler import TimeScheduler
-from wechat_agent.wechat_tools import quote_context
+from echoloom.adk_runner import ScopedAdkRunner
+from echoloom.contacts import ContactIdentity
+from echoloom.context import build_hook_context
+from echoloom.context_assembler import MessageContextAssembler
+from echoloom.hook_contract import HookObservation, parse_callback
+from echoloom.hook_outbound import HookSendResult, HookTextSender
+from echoloom.memory_store import MemoryStore
+from echoloom.models import ConversationKey
+from echoloom.pilot import Pilot, _current_message_id
+from echoloom.rich_message import normalize_message
+from echoloom.time_scheduler import TimeScheduler
+from echoloom.wechat_tools import quote_context
 
 
 def observed(text="你好", *, room="room@chatroom", tick=123, sender="member"):
@@ -1108,9 +1108,9 @@ def test_session_maintenance_worker_defers_without_spinning_on_type_error_and_pr
 
 
 def test_provider_unavailable_after_send_side_effect_uses_retry_path_not_defer(tmp_path: Path):
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.outbound import OutboundService
-    from wechat_agent.wechat_gateway import SendResult
+    from echoloom.mock import SystemClock
+    from echoloom.outbound import OutboundService
+    from echoloom.wechat_gateway import SendResult
 
     async def scenario():
         attempted = asyncio.Event()
@@ -1178,7 +1178,7 @@ def test_provider_unavailable_after_send_side_effect_uses_retry_path_not_defer(t
             pilot.db.commit()
             await asyncio.wait_for(completed.wait(), timeout=3)
             for _ in range(50):
-                if pilot.scheduler.state_counts() == {"model_seen": 1}:
+                if len(sent) == 1 and pilot.scheduler.state_counts() == {"model_seen": 1}:
                     break
                 await asyncio.sleep(0.02)
             assert pilot.scheduler.state_counts() == {"model_seen": 1}
@@ -1357,7 +1357,7 @@ def test_worker_survives_transient_scheduler_error_and_budget_blocks_schedule_ne
 
 
 def test_standalone_ingress_synthesizes_full_status_schema_from_worker_heartbeat(tmp_path: Path):
-    from wechat_agent.ingress import Ingress, create_ingress_app
+    from echoloom.ingress import Ingress, create_ingress_app
 
     async def scenario():
         db_path = tmp_path / "scheme-a.sqlite3"
@@ -1498,9 +1498,9 @@ def test_session_maintenance_trigger_defers_30_minutes_on_noop_and_prunes(tmp_pa
 
 def test_attempts_table_never_blocks_pilot_inbox_batch_replay_and_outbound_dedups(tmp_path: Path):
     import hashlib
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.outbound import OutboundService
-    from wechat_agent.wechat_gateway import SendResult
+    from echoloom.mock import SystemClock
+    from echoloom.outbound import OutboundService
+    from echoloom.wechat_gateway import SendResult
 
     async def scenario():
         sent = []
@@ -1551,7 +1551,7 @@ def test_attempts_table_never_blocks_pilot_inbox_batch_replay_and_outbound_dedup
         try:
             await asyncio.wait_for(done.wait(), timeout=3)
             for _ in range(50):
-                if pilot.scheduler.state_counts() == {"model_seen": 1}:
+                if len(sent) == 1 and pilot.scheduler.state_counts() == {"model_seen": 1}:
                     break
                 await asyncio.sleep(0.02)
             assert reply_calls == 1
@@ -1567,7 +1567,7 @@ def test_attempts_table_never_blocks_pilot_inbox_batch_replay_and_outbound_dedup
 
 
 def test_layer3_scheduler_modules_have_no_hardcoded_hook_endpoints():
-    root = Path(__file__).resolve().parents[1] / "src" / "wechat_agent"
+    root = Path(__file__).resolve().parents[1] / "src" / "echoloom"
     for name in (
         "conversation_scheduler.py",
         "ingress.py",

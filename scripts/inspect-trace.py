@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from wechat_agent.trace_view import (
+from echoloom.trace_view import (
     DEFAULT_TRACE_DIR,
     load_records,
     render,

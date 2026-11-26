@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / ".runtime/native-image-download-deps"))
 
 import httpx
 
-from wechat_agent.adapters.hook_event_extension import DLL_SHA, PROBE, event_envelope
+from echoloom.adapters.hook_event_extension import DLL_SHA, PROBE, event_envelope
 
 
 def main():

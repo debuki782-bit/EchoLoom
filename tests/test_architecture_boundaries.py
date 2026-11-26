@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC_PKG = ROOT / "src" / "wechat_agent"
+SRC_PKG = ROOT / "src" / "echoloom"
 
 # Explicit monotonic dependency layering: a module in layer N may only import
 # same-package modules from layers <= N at module import time.
@@ -17,6 +17,7 @@ MODULE_LAYERS: dict[str, int] = {
     "bilibili": 0,
     "contacts": 0,
     "credentials": 0,
+    "db_async": 0,
     "freshness_policy": 0,
     "gateway_ingress": 0,
     "local_config": 0,
@@ -28,6 +29,7 @@ MODULE_LAYERS: dict[str, int] = {
     "ports": 0,
     "prompt_catalog": 0,
     "runtime_contract": 0,
+    "session_history": 0,
     "session_recycle_policy": 0,
     "temporal_context": 0,
     "tool_batch": 0,
@@ -46,10 +48,14 @@ MODULE_LAYERS: dict[str, int] = {
     "adapters.hook_recovery": 1,
     "adapters.hook_text": 1,
     "adapters.recording": 1,
+    "channel_gateway": 1,
     "connectors.__init__": 1,
     "connectors.base": 1,
+    "connectors.discord": 1,
+    "connectors.feishu": 1,
     "connectors.recording": 1,
     "connectors.registry": 1,
+    "connectors.telegram": 1,
     "connectors.webhook": 1,
     "connectors.wechat_hook": 1,
     "context": 1,
@@ -65,10 +71,13 @@ MODULE_LAYERS: dict[str, int] = {
     "episode_memory": 2,
     "event_book": 2,
     "memory_store": 2,
+    "outbound_store": 2,
     "repos.__init__": 2,
+    "repos.enrichment": 2,
     "repos.knowledge_repo": 2,
     "repos.media_repo": 2,
     "repos.message_repo": 2,
+    "repos.schema": 2,
     "runtime_scope": 2,
     "storage": 2,
     "time_scheduler": 2,
@@ -77,9 +86,11 @@ MODULE_LAYERS: dict[str, int] = {
     "context_assembler": 3,
     "context_builder": 3,
     "cross_session": 3,
+    "cross_session_sql": 3,
     "message_ingestor": 3,
     # Layer 4: Turn scope, ingress, outbound, dispatcher, triggers & Pilot facade.
     "dispatcher": 4,
+    "dispatcher_support": 4,
     "ingress": 4,
     "outbound": 4,
     "pilot": 4,
@@ -90,6 +101,8 @@ MODULE_LAYERS: dict[str, int] = {
     "adk_runner": 5,
     "agent_tools": 5,
     "bootstrap": 5,
+    "channel_tools": 5,
+    "cli": 5,
     "cross_chat_dedupe": 5,
     "cross_session_tools": 5,
     "frameworks.__init__": 5,
@@ -102,6 +115,10 @@ MODULE_LAYERS: dict[str, int] = {
     "jev_strategy": 5,
     "project_tools": 5,
     "providers": 5,
+    "runtime_context_hook": 5,
+    "runtime_providers": 5,
+    "runtime_route": 5,
+    "runtime_runners": 5,
     "session_rollover": 5,
     "session_runtime": 5,
     "toolsets.__init__": 5,
@@ -169,15 +186,15 @@ def _collect_runtime_imports(path: Path, current_module: str) -> list[str]:
                 continue
             if isinstance(stmt, ast.Import):
                 for alias in stmt.names:
-                    if alias.name == "wechat_agent":
+                    if alias.name == "echoloom":
                         found.append("__init__")
-                    elif alias.name.startswith("wechat_agent."):
-                        found.append(alias.name.removeprefix("wechat_agent."))
+                    elif alias.name.startswith("echoloom."):
+                        found.append(alias.name.removeprefix("echoloom."))
             elif isinstance(stmt, ast.ImportFrom):
                 if stmt.level > 0:
                     resolved = _resolve_relative(current_module, stmt.level, stmt.module)
                     found.append(resolved)
-                elif stmt.module == "wechat_agent":
+                elif stmt.module == "echoloom":
                     for alias in stmt.names:
                         candidate = alias.name
                         if candidate in MODULE_LAYERS:
@@ -186,8 +203,8 @@ def _collect_runtime_imports(path: Path, current_module: str) -> list[str]:
                             found.append(f"{candidate}.__init__")
                         else:
                             found.append("__init__")
-                elif stmt.module and stmt.module.startswith("wechat_agent."):
-                    found.append(stmt.module.removeprefix("wechat_agent."))
+                elif stmt.module and stmt.module.startswith("echoloom."):
+                    found.append(stmt.module.removeprefix("echoloom."))
 
     walk(tree.body)
     return found

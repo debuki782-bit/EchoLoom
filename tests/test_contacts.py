@@ -2,7 +2,7 @@ import json
 
 import httpx
 
-from wechat_agent.contacts import ContactIdentity, HookContactResolver, is_room_id
+from echoloom.contacts import ContactIdentity, HookContactResolver, is_room_id
 
 
 def test_resolver_uses_exact_user_name_and_only_takes_nickname_from_hook():

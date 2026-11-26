@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx  # noqa: F401 - compatibility target for CLI tests patching httpx.Client
 import uvicorn  # noqa: F401 - compatibility target for CLI tests patching uvicorn.run
 
-import wechat_agent.bootstrap as _bootstrap
+import echoloom.bootstrap as _bootstrap
 
 ROOT = Path(__file__).resolve().parents[1]
 _COMPAT_EXPORTS = frozenset({

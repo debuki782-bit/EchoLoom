@@ -9,11 +9,11 @@ from pathlib import Path
 import httpx
 from PIL import Image
 
-from wechat_agent.context import build_hook_context
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.media import WeChatImageIngestor, wechat_storage_root_from_status
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.rich_message import normalize_message, normalized_image_reference_records
+from echoloom.context import build_hook_context
+from echoloom.hook_contract import HookObservation
+from echoloom.media import WeChatImageIngestor, wechat_storage_root_from_status
+from echoloom.memory_store import MemoryStore
+from echoloom.rich_message import normalize_message, normalized_image_reference_records
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"original-png-payload"
 URL = "https://wx.qpic.cn/original.png?token=opaque"
@@ -185,7 +185,7 @@ def test_wechat_voice_ingestor_decodes_bounded_silk_to_wav(tmp_path: Path, monke
     store = MemoryStore(tmp_path / "data" / "agent-memory.sqlite3")
     archived = _archive(store, event)
 
-    from wechat_agent.media import WeChatVoiceIngestor
+    from echoloom.media import WeChatVoiceIngestor
     metadata = WeChatVoiceIngestor(tmp_path).ingest(
         item=event, message_id=archived.message_id, store=store,
     )
@@ -343,8 +343,8 @@ def test_thumbnail_fallback_requires_unique_metadata_match_and_marks_quality(tmp
 def test_fast_ingest_skips_cross_chat_scan_but_keeps_local_native_and_remote_paths(tmp_path: Path):
     import pytest
 
-    from wechat_agent.adapters.recording import RecordingGateway
-    from wechat_agent.wechat_gateway import GatewayConfig
+    from echoloom.adapters.recording import RecordingGateway
+    from echoloom.wechat_gateway import GatewayConfig
 
     source_root = tmp_path / "wechat-files"
     other_dir = source_root / "bot_1" / "msg" / "attach" / "other-chat" / "2026" / "Img"

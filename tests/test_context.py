@@ -4,10 +4,10 @@ from dataclasses import replace
 
 import pytest
 
-from wechat_agent.contacts import ContactIdentity
-from wechat_agent.context import build_hook_context, fit_context_window
-from wechat_agent.hook_contract import HookObservation, parse_callback
-from wechat_agent.rich_message import normalize_message
+from echoloom.contacts import ContactIdentity
+from echoloom.context import build_hook_context, fit_context_window
+from echoloom.hook_contract import HookObservation, parse_callback
+from echoloom.rich_message import normalize_message
 
 
 def observed(sender: str, text: str, *, room: str = "room@chatroom") -> HookObservation:
@@ -182,7 +182,7 @@ def test_context_budget_never_discards_current_batch() -> None:
 
 
 def test_idle_window_drops_oversized_activity_history_before_its_task() -> None:
-    from wechat_agent.context import ContextTurn, ContextWindow
+    from echoloom.context import ContextTurn, ContextWindow
 
     task = ContextTurn("system", "idle_task", "请整理", message_id="task")
     window = ContextWindow("bot", "idle", False, (task,), is_idle_event=True,
@@ -194,7 +194,7 @@ def test_idle_window_drops_oversized_activity_history_before_its_task() -> None:
 
 
 def test_rollover_history_marks_truncated_record_and_keeps_its_tail() -> None:
-    from wechat_agent.adk_runner import ScopedAdkRunner
+    from echoloom.adk_runner import ScopedAdkRunner
 
     runner = object.__new__(ScopedAdkRunner)
     runner.max_history_bytes = 300
@@ -263,7 +263,7 @@ def test_priority_sender_activity_and_recency_anchor_render_in_reference_tail() 
 def test_priority_sender_cross_chat_activity_from_memory_store(tmp_path) -> None:
     from datetime import UTC, datetime, timedelta
 
-    from wechat_agent.memory_store import MemoryStore
+    from echoloom.memory_store import MemoryStore
 
     store = MemoryStore(tmp_path / "memory.sqlite3")
     now = datetime.now(UTC)
@@ -316,8 +316,8 @@ def test_priority_sender_cross_chat_activity_from_memory_store(tmp_path) -> None
 
 
 def test_episode_semantic_text_strips_group_prefix_and_uses_vision_summary() -> None:
-    from wechat_agent.context import ContextTurn
-    from wechat_agent.episode_memory import EpisodeMemory
+    from echoloom.context import ContextTurn
+    from echoloom.episode_memory import EpisodeMemory
 
     img_turn = ContextTurn(
         "wxid_abc", "hook_group_member_wxid",

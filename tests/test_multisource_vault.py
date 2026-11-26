@@ -16,21 +16,21 @@ from pathlib import Path
 import httpx
 from fastapi.testclient import TestClient
 
-from wechat_agent import agent_profiles, bootstrap, local_config, prompt_catalog
-from wechat_agent.connectors import (
+from echoloom import agent_profiles, bootstrap, local_config, prompt_catalog
+from echoloom.connectors import (
     GatewayConfig,
     RegisteredSource,
     SourceRegistry,
     WebhookConnector,
 )
-from wechat_agent.contacts import ContactIdentity, is_group_conversation
-from wechat_agent.context import ContextTurn, ContextWindow
-from wechat_agent.media import WeChatVoiceIngestor
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.models import ConversationKey, ReplyDraft
-from wechat_agent.pilot import Pilot
-from wechat_agent.project_tools import ProjectTools
-from wechat_agent.temporal_context import DailyEnvironmentProvider, LocalWeatherProvider
+from echoloom.contacts import ContactIdentity, is_group_conversation
+from echoloom.context import ContextTurn, ContextWindow
+from echoloom.media import WeChatVoiceIngestor
+from echoloom.memory_store import MemoryStore
+from echoloom.models import ConversationKey, ReplyDraft
+from echoloom.pilot import Pilot
+from echoloom.project_tools import ProjectTools
+from echoloom.temporal_context import DailyEnvironmentProvider, LocalWeatherProvider
 
 
 def _wav_bytes(samples: int = 2400) -> bytes:
@@ -362,7 +362,7 @@ def test_load_live_route_and_build_ingress_without_chatroom_or_hook(tmp_path: Pa
         'default_source = "webhook"\n'
         '[sources.webhook]\n'
         'enabled = true\n'
-        'factory = "wechat_agent.connectors.webhook:WebhookConnector"\n'
+        'factory = "echoloom.connectors.webhook:WebhookConnector"\n'
         'channel = "webhook"\n'
         'account_id = "echo_bot"\n'
         'default_conversation_id = "room:webhook-main"\n',
@@ -401,7 +401,7 @@ def test_load_live_route_and_build_ingress_without_chatroom_or_hook(tmp_path: Pa
 
 
 def test_business_modules_never_import_concrete_hook_adapters() -> None:
-    root = Path(__file__).resolve().parents[1] / "src" / "wechat_agent"
+    root = Path(__file__).resolve().parents[1] / "src" / "echoloom"
     business_files = [
         root / name
         for name in (

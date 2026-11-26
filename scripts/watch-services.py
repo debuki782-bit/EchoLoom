@@ -114,7 +114,7 @@ def _hook_monitoring_enabled() -> bool:
     if factory:
         return "hook" in factory.casefold()
     try:
-        from wechat_agent import local_config
+        from echoloom import local_config
 
         default_id, specs = local_config.load_source_configs(ROOT)
         if specs:

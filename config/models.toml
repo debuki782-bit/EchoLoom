@@ -5,6 +5,8 @@
 
 [roles]
 default_memory_model = "gpt-6-luna"
+decision_model = "gemini-decision-1"
+decision_endpoint = "https://generativelanguage.googleapis.com/v1beta/decisions"
 web_model = "gemini-3.8-flash"
 image_description_model = "gemini-4-hydrogen"
 transcribe_model = "gemini-3.5-transcribe"

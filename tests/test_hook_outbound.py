@@ -6,11 +6,11 @@ import random
 import httpx
 import pytest
 
-from wechat_agent.adapters.hook import HookGateway
-from wechat_agent.adapters.hook_text import SendPacer
-from wechat_agent.hook_outbound import HookTextSender
-from wechat_agent.models import ConversationKey, ReplyDraft
-from wechat_agent.wechat_gateway import GatewayConfig
+from echoloom.adapters.hook import HookGateway
+from echoloom.adapters.hook_text import SendPacer
+from echoloom.hook_outbound import HookTextSender
+from echoloom.models import ConversationKey, ReplyDraft
+from echoloom.wechat_gateway import GatewayConfig
 
 KEY = ConversationKey("bot", "test@chatroom")
 DRAFT = ReplyDraft("one", KEY, "测试", 0)

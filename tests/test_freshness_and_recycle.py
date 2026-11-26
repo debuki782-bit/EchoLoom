@@ -12,29 +12,29 @@ from google.adk.events import Event
 from google.genai import types
 from test_openai_runtime import FakeAdkModel
 
-from wechat_agent.agent_profiles import load_agent_profiles
-from wechat_agent.contacts import ContactIdentity
-from wechat_agent.context import ContextWindow
-from wechat_agent.context_assembler import MessageContextAssembler
-from wechat_agent.freshness_policy import (
+from echoloom.agent_profiles import load_agent_profiles
+from echoloom.contacts import ContactIdentity
+from echoloom.context import ContextWindow
+from echoloom.context_assembler import MessageContextAssembler
+from echoloom.freshness_policy import (
     PendingInboundSnapshot,
     evaluate_outbound_freshness,
 )
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.mock import SystemClock
-from wechat_agent.model_catalog import load_model_catalog
-from wechat_agent.outbound import OutboundService
-from wechat_agent.pilot import Pilot
-from wechat_agent.session_recycle_policy import (
+from echoloom.hook_contract import HookObservation
+from echoloom.memory_store import MemoryStore
+from echoloom.mock import SystemClock
+from echoloom.model_catalog import load_model_catalog
+from echoloom.outbound import OutboundService
+from echoloom.pilot import Pilot
+from echoloom.session_recycle_policy import (
     CacheRecycleRule,
     evaluate_cache_recycle,
     resolve_cache_recycle_rule,
 )
-from wechat_agent.session_rollover import SessionRolloverPolicy, route_hash, session_keys
-from wechat_agent.session_runtime import ScopedAgentRuntime
-from wechat_agent.wechat_gateway import SendResult
-from wechat_agent.wechat_tools import WeChatTools
+from echoloom.session_rollover import SessionRolloverPolicy, route_hash, session_keys
+from echoloom.session_runtime import ScopedAgentRuntime
+from echoloom.wechat_gateway import SendResult
+from echoloom.wechat_tools import WeChatTools
 
 
 def _pending(
@@ -487,7 +487,7 @@ def test_cache_recycle_integrates_with_rollover_and_config(tmp_path: Path) -> No
 
 
 def test_router_gateway_send_image_and_quote_use_active_account_provider(tmp_path: Path) -> None:
-    from wechat_agent.connectors import (
+    from echoloom.connectors import (
         GatewayConfig,
         RegisteredSource,
         SourceRegistry,

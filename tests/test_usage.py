@@ -4,8 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
-from wechat_agent.storage import Repository
-from wechat_agent.usage import UsageLedger
+from echoloom.storage import Repository
+from echoloom.usage import UsageLedger
 
 
 class MutableClock:

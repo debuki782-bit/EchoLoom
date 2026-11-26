@@ -11,12 +11,12 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 
-from wechat_agent.adk_runner import DeterministicLlm, ScopedAdkRunner
-from wechat_agent.context import build_hook_context
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.hook_outbound import HookSendResult
-from wechat_agent.mock import SystemClock
-from wechat_agent.wechat_tools import WeChatTools, operation_id
+from echoloom.adk_runner import DeterministicLlm, ScopedAdkRunner
+from echoloom.context import build_hook_context
+from echoloom.hook_contract import HookObservation
+from echoloom.hook_outbound import HookSendResult
+from echoloom.mock import SystemClock
+from echoloom.wechat_tools import WeChatTools, operation_id
 
 
 def observed(account: str, room: str, sender: str, text: str) -> HookObservation:
@@ -559,7 +559,7 @@ def test_safety_block_redacts_model_request_snapshot(tmp_path: Path) -> None:
 
 def test_session_byte_estimate_does_not_count_image_payloads() -> None:
     from types import SimpleNamespace
-    from wechat_agent.adk_runner import _estimated_event_bytes
+    from echoloom.adk_runner import _estimated_event_bytes
 
     text_event = SimpleNamespace(content=SimpleNamespace(parts=[
         SimpleNamespace(text="你好" * 500),
@@ -588,8 +588,8 @@ def test_session_byte_estimate_does_not_count_image_payloads() -> None:
 def test_live_session_events_filters_rewound_invocations_without_adk_imports() -> None:
     import inspect
     from types import SimpleNamespace
-    import wechat_agent.session_runtime as session_runtime
-    from wechat_agent.session_runtime import _live_session_events
+    import echoloom.session_runtime as session_runtime
+    from echoloom.session_runtime import _live_session_events
 
     source = inspect.getsource(session_runtime)
     assert "google.adk" not in source and "google.genai" not in source
@@ -623,8 +623,8 @@ def test_model_provider_unavailable_preserves_idle_session_seen_ids_and_hydratio
 ) -> None:
     from google.adk.events import Event, EventActions
     from pydantic import PrivateAttr
-    from wechat_agent.runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
-    from wechat_agent.session_runtime import _live_session_events, session_keys
+    from echoloom.runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
+    from echoloom.session_runtime import _live_session_events, session_keys
 
     class ControllableLlm(BaseLlm):
         _requests: list = PrivateAttr(default_factory=list)

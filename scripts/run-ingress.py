@@ -9,8 +9,8 @@ from pathlib import Path
 
 import uvicorn  # noqa: F401 - compatibility target for tests patching run_ingress.uvicorn.run
 
-from wechat_agent import local_config
-from wechat_agent.bootstrap import build_ingress_app, load_live_route, run_ingress
+from echoloom import local_config
+from echoloom.bootstrap import build_ingress_app, load_live_route, run_ingress
 
 ROOT = Path(__file__).resolve().parents[1]
 load_route = load_live_route

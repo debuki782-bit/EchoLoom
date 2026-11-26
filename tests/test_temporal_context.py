@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime
 
 import httpx
 
-from wechat_agent.temporal_context import (
+from echoloom.temporal_context import (
     DailyEnvironmentProvider,
     ShenzhenWeatherProvider,
     current_time_context,

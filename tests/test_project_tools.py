@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from wechat_agent.project_tools import ProjectTools
+from echoloom.project_tools import ProjectTools
 
 
 def test_project_tool_is_scoped_and_prompt_edits_can_restore_git_head(tmp_path: Path):

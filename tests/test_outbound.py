@@ -8,13 +8,13 @@ from pathlib import Path
 
 from PIL import Image
 
-from wechat_agent import turn_scope, wechat_tools
-from wechat_agent.context import ContextTurn, ContextWindow
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.mock import SystemClock
-from wechat_agent.outbound import OutboundService
-from wechat_agent.wechat_gateway import SendResult
-from wechat_agent.wechat_tools import WeChatTools
+from echoloom import turn_scope, wechat_tools
+from echoloom.context import ContextTurn, ContextWindow
+from echoloom.memory_store import MemoryStore
+from echoloom.mock import SystemClock
+from echoloom.outbound import OutboundService
+from echoloom.wechat_gateway import SendResult
+from echoloom.wechat_tools import WeChatTools
 
 ACCOUNT = "wxid_bot_outbound"
 ROOM = "outbound-room@chatroom"
@@ -310,7 +310,7 @@ def test_multi_segment_delivery_quote_archiving_and_sleep_patch(tmp_path: Path, 
         waits.append(seconds)
 
     # Patching via wechat_tools.asyncio.sleep must intercept outbound.py's asyncio.sleep.
-    monkeypatch.setattr("wechat_agent.wechat_tools.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("echoloom.wechat_tools.asyncio.sleep", fake_sleep)
 
     async def scenario():
         memory = MemoryStore(tmp_path / "memory.sqlite3")
@@ -508,7 +508,7 @@ def test_deliver_auto_reply_orchestrates_retries_notices_and_tool_dedup(tmp_path
 
 
 def test_outbound_and_turn_scope_have_no_hardcoded_hook_endpoints():
-    root = Path(__file__).parents[1] / "src" / "wechat_agent"
+    root = Path(__file__).parents[1] / "src" / "echoloom"
     for name in ("turn_scope.py", "outbound.py", "wechat_tools.py"):
         source = (root / name).read_text("utf-8")
         for endpoint in (

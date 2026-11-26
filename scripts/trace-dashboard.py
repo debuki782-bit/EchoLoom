@@ -5,7 +5,7 @@ import argparse
 
 import uvicorn
 
-from wechat_agent.trace_dashboard import create_trace_dashboard
+from echoloom.trace_dashboard import create_trace_dashboard
 
 
 def main() -> None:

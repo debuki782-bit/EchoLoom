@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from wechat_agent.time_scheduler import TimeScheduler
+from echoloom.time_scheduler import TimeScheduler
 
 
 def test_time_scheduler_claims_defers_and_cancels_account_jobs(tmp_path):

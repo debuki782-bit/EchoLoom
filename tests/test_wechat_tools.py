@@ -10,13 +10,13 @@ from types import SimpleNamespace
 import httpx
 from PIL import Image
 
-from wechat_agent.event_book import EventBook
-from wechat_agent.hook_outbound import HookSendResult
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.mock import SystemClock
-from wechat_agent.storage import Repository
-from wechat_agent.usage import UsageLedger
-from wechat_agent.wechat_tools import (
+from echoloom.event_book import EventBook
+from echoloom.hook_outbound import HookSendResult
+from echoloom.memory_store import MemoryStore
+from echoloom.mock import SystemClock
+from echoloom.storage import Repository
+from echoloom.usage import UsageLedger
+from echoloom.wechat_tools import (
     WeChatTools,
     _segment_pause_seconds,
     active_conversation,
@@ -939,7 +939,7 @@ def test_segment_pause_seconds_adds_bounded_random_jitter():
 
 
 def test_commit_agent_turn_multi_bubble_waits_with_jitter(tmp_path, monkeypatch):
-    import wechat_agent.wechat_tools as wt_mod
+    import echoloom.wechat_tools as wt_mod
 
     waits: list[float] = []
 
@@ -985,14 +985,14 @@ def test_commit_agent_turn_multi_bubble_waits_with_jitter(tmp_path, monkeypatch)
 def test_commit_agent_turn_supports_sticker_only_and_text_image_combo(tmp_path, monkeypatch):
     from PIL import Image
 
-    from wechat_agent.memory_store import MemoryStore
+    from echoloom.memory_store import MemoryStore
 
     waits: list[float] = []
 
     async def fake_sleep(seconds: float) -> None:
         waits.append(seconds)
 
-    monkeypatch.setattr("wechat_agent.wechat_tools.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("echoloom.wechat_tools.asyncio.sleep", fake_sleep)
 
     async def scenario():
         (tmp_path / "data").mkdir()
@@ -1091,7 +1091,7 @@ def test_commit_agent_turn_supports_sticker_only_and_text_image_combo(tmp_path, 
 
 
 def test_toolsets_split_tool_names_property_forwarding_and_dead_method_removal(tmp_path: Path):
-    from wechat_agent.toolsets import MediaToolset, MemoryToolset, ReplyToolset
+    from echoloom.toolsets import MediaToolset, MemoryToolset, ReplyToolset
 
     (tmp_path / "data").mkdir()
     tools = WeChatTools(tmp_path, "bot", "room@chatroom", None, None, None, SystemClock())
@@ -1181,7 +1181,7 @@ def test_toolsets_split_tool_names_property_forwarding_and_dead_method_removal(t
 
 
 def test_toolset_modules_have_no_hardcoded_hook_endpoints():
-    root = Path(__file__).parents[1] / "src" / "wechat_agent"
+    root = Path(__file__).parents[1] / "src" / "echoloom"
     files = (
         root / "wechat_tools.py",
         root / "toolsets" / "__init__.py",

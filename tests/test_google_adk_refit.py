@@ -14,12 +14,12 @@ from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from pydantic import PrivateAttr
 
-from wechat_agent.context import ContextTurn, ContextWindow
-from wechat_agent.frameworks.adk import AdkFramework, to_adk
-from wechat_agent.frameworks.adk_budget import BudgetedAdkModel
-from wechat_agent.frameworks.google_web import GoogleWeb, GoogleWebModel
-from wechat_agent.runtime_contract import AgentTool
-from wechat_agent.session_runtime import ScopedAgentRuntime
+from echoloom.context import ContextTurn, ContextWindow
+from echoloom.frameworks.adk import AdkFramework, to_adk
+from echoloom.frameworks.adk_budget import BudgetedAdkModel
+from echoloom.frameworks.google_web import GoogleWeb, GoogleWebModel
+from echoloom.runtime_contract import AgentTool
+from echoloom.session_runtime import ScopedAgentRuntime
 
 
 class RecallModel(BaseLlm):
@@ -65,7 +65,7 @@ def test_episode_tool_results_are_available_only_in_current_adk_invocation(tmp_p
 
 
 def test_production_assembly_uses_google_web_and_keeps_background_memory(tmp_path, monkeypatch):
-    from wechat_agent import bootstrap
+    from echoloom import bootstrap
 
     root = Path(__file__).resolve().parents[1]
     shutil.copytree(root / "config", tmp_path / "config")

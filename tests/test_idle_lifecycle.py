@@ -9,12 +9,12 @@ from google.genai import types
 from pydantic import PrivateAttr
 from test_openai_runtime import FakeAdkModel
 
-from wechat_agent.context import ContextTurn, ContextWindow
-from wechat_agent.idle_tools import IdleActivityToolset
-from wechat_agent.runtime_contract import ModelCallsLimitExceeded
-from wechat_agent.session_runtime import ScopedAgentRuntime
-from wechat_agent.time_scheduler import TimeScheduler
-from wechat_agent.tool_timing import agent_function_tool
+from echoloom.context import ContextTurn, ContextWindow
+from echoloom.idle_tools import IdleActivityToolset
+from echoloom.runtime_contract import ModelCallsLimitExceeded
+from echoloom.session_runtime import ScopedAgentRuntime
+from echoloom.time_scheduler import TimeScheduler
+from echoloom.tool_timing import agent_function_tool
 
 
 def call(name, arguments, index):

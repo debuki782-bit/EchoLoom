@@ -6,9 +6,9 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 
-from wechat_agent.adk_runner import DeterministicLlm, ScopedAdkRunner
-from wechat_agent.agent_tools import AgentToolStatus, ReadOnlyToolset
-from wechat_agent.context import ContextTurn, ContextWindow
+from echoloom.adk_runner import DeterministicLlm, ScopedAdkRunner
+from echoloom.agent_tools import AgentToolStatus, ReadOnlyToolset
+from echoloom.context import ContextTurn, ContextWindow
 
 
 class ToolCallingLlm(DeterministicLlm):

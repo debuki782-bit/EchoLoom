@@ -1,11 +1,11 @@
 import json
 import sqlite3
 
-from wechat_agent.adapters.hook_event_extension import event_envelope
-from wechat_agent.adapters.hook_events import parse_callback
-from wechat_agent.context import _message_text, build_hook_context
-from wechat_agent.conversation_scheduler import ConversationScheduler
-from wechat_agent.rich_message import normalize_message
+from echoloom.adapters.hook_event_extension import event_envelope
+from echoloom.adapters.hook_events import parse_callback
+from echoloom.context import _message_text, build_hook_context
+from echoloom.conversation_scheduler import ConversationScheduler
+from echoloom.rich_message import normalize_message
 
 BOT, MEMBER, OTHER = "wxid_bot_example", "wxid_member_example", "wxid_other_example"
 

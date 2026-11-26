@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from wechat_agent.storage import Repository
-from wechat_agent.web_tools import WebSearchUsage, _public_https_url
+from echoloom.storage import Repository
+from echoloom.web_tools import WebSearchUsage, _public_https_url
 
 
 def test_web_search_usage_counts_queries_and_estimates_overage(tmp_path):
@@ -30,8 +30,8 @@ def test_page_tool_routes_bilibili_videos_and_keeps_only_one_read_tool(monkeypat
     import asyncio
     from types import SimpleNamespace
 
-    from wechat_agent.bilibili import BilibiliReader
-    from wechat_agent.web_tools import WebToolset
+    from echoloom.bilibili import BilibiliReader
+    from echoloom.web_tools import WebToolset
 
     calls = []
     async def video(self, url, **kwargs):
@@ -56,7 +56,7 @@ def test_nonvideo_bilibili_urls_use_general_reader_without_comment_requests():
     import asyncio
     from types import SimpleNamespace
 
-    from wechat_agent.web_tools import WebToolset
+    from echoloom.web_tools import WebToolset
 
     calls = []
     async def general(url, *, search):

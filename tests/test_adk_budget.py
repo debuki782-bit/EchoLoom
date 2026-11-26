@@ -13,27 +13,27 @@ from google.adk.tools import FunctionTool
 from google.genai import types
 from pydantic import PrivateAttr
 
-from wechat_agent.adk_budget import (
+from echoloom.adk_budget import (
     BudgetedAdkModel,
     ModelProviderUnavailable,
     _is_pre_dispatch_connect_error,
     image_access_blocked,
     model_usage_scope,
 )
-from wechat_agent.adk_runner import DeterministicLlm, ScopedAdkRunner
-from wechat_agent.agent_tools import AgentToolStatus
-from wechat_agent.context import ContextTurn, ContextWindow
-from wechat_agent.frameworks.adk import AdkFramework
-from wechat_agent.models import InboundEvent
-from wechat_agent.providers import GeminiProvider, ModelCallIndeterminate
-from wechat_agent.runtime_contract import (
+from echoloom.adk_runner import DeterministicLlm, ScopedAdkRunner
+from echoloom.agent_tools import AgentToolStatus
+from echoloom.context import ContextTurn, ContextWindow
+from echoloom.frameworks.adk import AdkFramework
+from echoloom.models import InboundEvent
+from echoloom.providers import GeminiProvider, ModelCallIndeterminate
+from echoloom.runtime_contract import (
     AgentTool,
     Content as RuntimeContent,
     Part as RuntimePart,
     RunOptions,
 )
-from wechat_agent.storage import Repository
-from wechat_agent.usage import UsageLedger
+from echoloom.storage import Repository
+from echoloom.usage import UsageLedger
 
 
 class Clock:

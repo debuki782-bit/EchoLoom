@@ -10,12 +10,12 @@ import httpx
 import pytest
 from PIL import Image
 
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.media import WeChatImageIngestor, image_for_model
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.mock import SystemClock
-from wechat_agent.wechat_tools import WeChatTools, memory_context
-from wechat_agent.wxgf import wxgf_image
+from echoloom.hook_contract import HookObservation
+from echoloom.media import WeChatImageIngestor, image_for_model
+from echoloom.memory_store import MemoryStore
+from echoloom.mock import SystemClock
+from echoloom.wechat_tools import WeChatTools, memory_context
+from echoloom.wxgf import wxgf_image
 
 
 @pytest.fixture(scope="module")
@@ -208,7 +208,7 @@ def test_text_description_uses_same_upgrade_path_before_vision_call(tmp_path, wx
         assert Path(path).read_bytes() == wxgf
         raise ValueError("original_reached_vision_input")
 
-    monkeypatch.setattr("wechat_agent.toolsets.media.image_for_model", stop_before_paid_call)
+    monkeypatch.setattr("echoloom.toolsets.media.image_for_model", stop_before_paid_call)
     try:
         result = asyncio.run(tools.read_wechat_image())
         assert result["error"] == "original_reached_vision_input"
@@ -221,9 +221,9 @@ def test_text_description_uses_same_upgrade_path_before_vision_call(tmp_path, wx
 
 def test_read_wechat_image_uses_gemini_4_hydrogen_and_settles_usage(tmp_path, wxgf):
     from types import SimpleNamespace
-    from wechat_agent.runtime_scope import model_usage_scope
-    from wechat_agent.storage import Repository
-    from wechat_agent.usage import UsageLedger
+    from echoloom.runtime_scope import model_usage_scope
+    from echoloom.storage import Repository
+    from echoloom.usage import UsageLedger
 
     store, message, image_id, ingestor, _, _ = _setup(tmp_path, wxgf, state="original")
     repo = Repository(tmp_path / "usage.sqlite3")
@@ -281,7 +281,7 @@ def test_read_wechat_image_uses_gemini_4_hydrogen_and_settles_usage(tmp_path, wx
 
 
 def test_context_assembler_upgrades_recent_thumbnail_before_display(tmp_path, wxgf):
-    from wechat_agent.context_assembler import MessageContextAssembler
+    from echoloom.context_assembler import MessageContextAssembler
 
     store, _, image_id, ingestor, _, _ = _setup(tmp_path, wxgf, state="thumbnail")
     assembler = MessageContextAssembler(
@@ -316,7 +316,7 @@ def test_context_assembler_upgrades_recent_thumbnail_before_display(tmp_path, wx
 
 
 def test_context_assembler_default_skips_synchronous_thumbnail_upgrade(tmp_path, wxgf):
-    from wechat_agent.context_assembler import MessageContextAssembler
+    from echoloom.context_assembler import MessageContextAssembler
 
     store, _, image_id, ingestor, _, calls = _setup(tmp_path, wxgf, state="thumbnail")
     assembler = MessageContextAssembler(

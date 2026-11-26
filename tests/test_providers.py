@@ -6,10 +6,10 @@ from typing import Any
 
 import pytest
 
-from wechat_agent.models import InboundEvent
-from wechat_agent.providers import GeminiProvider, ModelCallIndeterminate, SafetyBlocked, _rates
-from wechat_agent.storage import Repository
-from wechat_agent.usage import UsageLedger
+from echoloom.models import InboundEvent
+from echoloom.providers import GeminiProvider, ModelCallIndeterminate, SafetyBlocked, _rates
+from echoloom.storage import Repository
+from echoloom.usage import UsageLedger
 
 
 class FixedClock:
@@ -64,7 +64,7 @@ def test_gemini_argon_uses_date_appropriate_rates() -> None:
 
 
 def test_gemini_hydrogen_uses_verified_rates() -> None:
-    from wechat_agent.providers import _cached_input_rate
+    from echoloom.providers import _cached_input_rate
 
     assert _rates("gemini-4-hydrogen", "2026-11-13T01:00:00+00:00") == (
         1_500_000, 7_500_000,

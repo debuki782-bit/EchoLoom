@@ -11,18 +11,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from wechat_agent.context import ContextTurn, ContextWindow
-from wechat_agent.cross_chat_dedupe import CrossChatDedupeStore
-from wechat_agent.episode_memory import RecallTurn, recall_turn
-from wechat_agent.runtime_contract import ModelProviderUnavailable
-from wechat_agent.session_rollover import (
+from echoloom.context import ContextTurn, ContextWindow
+from echoloom.cross_chat_dedupe import CrossChatDedupeStore
+from echoloom.episode_memory import RecallTurn, recall_turn
+from echoloom.runtime_contract import ModelProviderUnavailable
+from echoloom.session_rollover import (
     PreparedSession,
     SessionRolloverPolicy,
     route_hash,
     session_keys,
 )
-from wechat_agent.session_runtime import ScopedAgentRuntime
-from wechat_agent.turn_hooks import (
+from echoloom.session_runtime import ScopedAgentRuntime
+from echoloom.turn_hooks import (
     EpisodeRagTurnHook,
     JevStrategyTurnHook,
     TraceTurnHook,

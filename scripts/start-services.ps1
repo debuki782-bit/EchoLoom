@@ -41,7 +41,7 @@ if (-not (Test-Path -LiteralPath $dashboardScript -PathType Leaf)) {
     throw "管理页启动脚本不存在：$dashboardScript"
 }
 
-$runtimeMetaJson = & $python -m wechat_agent.local_config runtime-json 2>$null
+$runtimeMetaJson = & $python -m echoloom.local_config runtime-json 2>$null
 $runtimeMeta = if ($LASTEXITCODE -eq 0 -and $runtimeMetaJson) { $runtimeMetaJson | ConvertFrom-Json } else { $null }
 $srvCfg = if ($runtimeMeta -and $runtimeMeta.server) { $runtimeMeta.server } else { [pscustomobject]@{
     ingress_host = '127.0.0.1'
@@ -212,7 +212,7 @@ function Invoke-HealthCheck([bool]$customGateway) {
 
 $configuredFactory = if ($env:ECHOLOOM_GATEWAY_FACTORY) { $env:ECHOLOOM_GATEWAY_FACTORY } else { $env:WECHAT_GATEWAY_FACTORY }
 $usesWechatSource = if ($configuredFactory) {
-    $configuredFactory -in @('wechat_agent.adapters.hook:HookGateway', 'wechat_agent.connectors.wechat_hook:WeChatHookConnector')
+    $configuredFactory -in @('echoloom.adapters.hook:HookGateway', 'echoloom.connectors.wechat_hook:WeChatHookConnector')
 } elseif ($runtimeMeta -and $runtimeMeta.sources -and $runtimeMeta.sources.Count -gt 0) {
     @($runtimeMeta.sources) -contains 'wechat'
 } else {

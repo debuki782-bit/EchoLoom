@@ -8,7 +8,7 @@ import httpx
 import pytest
 from PIL import Image
 
-from wechat_agent.native_image_download import NativeImageDownloader, download_spec
+from echoloom.native_image_download import NativeImageDownloader, download_spec
 
 buffer = io.BytesIO()
 Image.new("RGB", (16, 12), "purple").save(buffer, format="PNG")

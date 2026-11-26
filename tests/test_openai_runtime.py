@@ -9,17 +9,17 @@ from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from pydantic import PrivateAttr
 
-from wechat_agent.agent_profiles import (
+from echoloom.agent_profiles import (
     LUNA_ACTIVE_COMPRESSION_TOKENS,
     LUNA_IDLE_COMPRESSION_TOKENS,
 )
-from wechat_agent.context import build_hook_context
-from wechat_agent.frameworks.adk import AdkFramework, to_adk
-from wechat_agent.frameworks.adk_budget import BudgetedAdkModel
-from wechat_agent.frameworks.adk_openai import OpenAIAdkModel
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.runtime_contract import AgentTool, Part as RuntimePart
-from wechat_agent.session_runtime import ScopedAgentRuntime
+from echoloom.context import build_hook_context
+from echoloom.frameworks.adk import AdkFramework, to_adk
+from echoloom.frameworks.adk_budget import BudgetedAdkModel
+from echoloom.frameworks.adk_openai import OpenAIAdkModel
+from echoloom.hook_contract import HookObservation
+from echoloom.runtime_contract import AgentTool, Part as RuntimePart
+from echoloom.session_runtime import ScopedAgentRuntime
 
 
 def window(text='你好', room='friend'):
@@ -147,9 +147,9 @@ def test_media_runtime_part_converts_to_adk_part():
 
 
 def test_real_wechat_tools_register_and_commit_partial_success(tmp_path):
-    from wechat_agent.wechat_tools import WeChatTools, operation_id
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.hook_outbound import HookSendResult
+    from echoloom.wechat_tools import WeChatTools, operation_id
+    from echoloom.mock import SystemClock
+    from echoloom.hook_outbound import HookSendResult
     async def scenario():
         (tmp_path/'data').mkdir()
         sent = []
@@ -194,10 +194,10 @@ def test_sdk_image_tool_pixels_reach_next_model_request(tmp_path):
 def test_official_client_request_usage_and_unknown_accounting(tmp_path):
     import httpx as httpx2
     from openai import AsyncOpenAI
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.providers import ModelCallIndeterminate
-    from wechat_agent.storage import Repository
-    from wechat_agent.usage import UsageLedger
+    from echoloom.mock import SystemClock
+    from echoloom.providers import ModelCallIndeterminate
+    from echoloom.storage import Repository
+    from echoloom.usage import UsageLedger
 
     async def scenario():
         calls = []
@@ -317,9 +317,9 @@ def test_luna_active_compression_happens_before_new_turn_once(tmp_path):
 def test_luna_complete_request_input_limit(tmp_path, tokens, allowed):
     import json
     from openai import AsyncOpenAI
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.storage import Repository
-    from wechat_agent.usage import UsageLedger
+    from echoloom.mock import SystemClock
+    from echoloom.storage import Repository
+    from echoloom.usage import UsageLedger
 
     async def scenario():
         requests = []
@@ -364,11 +364,11 @@ def test_luna_complete_request_input_limit(tmp_path, tokens, allowed):
 
 def test_pilot_queue_to_adk_tool_to_hook_format_once(tmp_path):
     import json
-    from wechat_agent.hook_outbound import HookTextSender
-    from wechat_agent.models import ConversationKey
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.pilot import Pilot
-    from wechat_agent.wechat_tools import WeChatTools
+    from echoloom.hook_outbound import HookTextSender
+    from echoloom.models import ConversationKey
+    from echoloom.mock import SystemClock
+    from echoloom.pilot import Pilot
+    from echoloom.wechat_tools import WeChatTools
 
     async def scenario():
         (tmp_path/'data').mkdir()
@@ -412,10 +412,10 @@ def test_pilot_queue_to_adk_tool_to_hook_format_once(tmp_path):
 
 
 def test_all_business_tools_generate_adk_schema_without_tool_context():
-    from wechat_agent.cross_session_tools import CrossSessionToolset
-    from wechat_agent.project_tools import ProjectTools
-    from wechat_agent.idle_tools import IdleActivityToolset
-    from wechat_agent.wechat_tools import WeChatTools
+    from echoloom.cross_session_tools import CrossSessionToolset
+    from echoloom.project_tools import ProjectTools
+    from echoloom.idle_tools import IdleActivityToolset
+    from echoloom.wechat_tools import WeChatTools
     for cls in (CrossSessionToolset, ProjectTools, IdleActivityToolset, WeChatTools):
         for tool in cls.__new__(cls).agent_tools():
             decl = to_adk(tool)._get_declaration().model_dump(exclude_none=True)
@@ -447,11 +447,11 @@ def test_sdk_idle_summary_runs_once_and_is_in_next_session(tmp_path):
 def test_openai_count_input_tokens_transport_failure_raises_provider_unavailable(tmp_path):
     from google.adk.models.llm_request import LlmRequest
     from openai import AsyncOpenAI
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.runtime_contract import ModelProviderUnavailable
-    from wechat_agent.runtime_scope import model_usage_scope
-    from wechat_agent.storage import Repository
-    from wechat_agent.usage import UsageLedger
+    from echoloom.mock import SystemClock
+    from echoloom.runtime_contract import ModelProviderUnavailable
+    from echoloom.runtime_scope import model_usage_scope
+    from echoloom.storage import Repository
+    from echoloom.usage import UsageLedger
 
     async def scenario():
         for err_cls in (httpx.ConnectError, httpx.ReadTimeout, httpx.ProxyError):
@@ -500,11 +500,11 @@ def test_openai_post_reserve_pre_vs_post_dispatch_errors(
 ):
     from google.adk.models.llm_request import LlmRequest
     from openai import AsyncOpenAI
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
-    from wechat_agent.runtime_scope import model_usage_scope
-    from wechat_agent.storage import Repository
-    from wechat_agent.usage import UsageLedger
+    from echoloom.mock import SystemClock
+    from echoloom.runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
+    from echoloom.runtime_scope import model_usage_scope
+    from echoloom.storage import Repository
+    from echoloom.usage import UsageLedger
 
     expected_exc = ModelProviderUnavailable if expected_name == 'ModelProviderUnavailable' else ModelCallIndeterminate
 
@@ -549,18 +549,18 @@ def test_openai_post_reserve_pre_vs_post_dispatch_errors(
 def test_adk_openai_rollback_and_mid_turn_indeterminate(tmp_path):
     import json
     from openai import AsyncOpenAI
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.runtime_contract import (
+    from echoloom.mock import SystemClock
+    from echoloom.runtime_contract import (
         Content,
         ModelCallIndeterminate,
         ModelProviderUnavailable,
         Part,
         RunOptions,
     )
-    from wechat_agent.runtime_scope import model_usage_scope
-    from wechat_agent.session_rollover import live_session_events
-    from wechat_agent.storage import Repository
-    from wechat_agent.usage import UsageLedger
+    from echoloom.runtime_scope import model_usage_scope
+    from echoloom.session_rollover import live_session_events
+    from echoloom.storage import Repository
+    from echoloom.usage import UsageLedger
 
     async def scenario():
         response_bodies: list[dict] = []
@@ -727,11 +727,11 @@ def test_openai_http_reject_status_releases_or_retains_reservation(
 ):
     from google.adk.models.llm_request import LlmRequest
     from openai import AsyncOpenAI
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
-    from wechat_agent.runtime_scope import model_usage_scope
-    from wechat_agent.storage import Repository
-    from wechat_agent.usage import UsageLedger
+    from echoloom.mock import SystemClock
+    from echoloom.runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
+    from echoloom.runtime_scope import model_usage_scope
+    from echoloom.storage import Repository
+    from echoloom.usage import UsageLedger
 
     exc_map = {
         'ModelProviderUnavailable': ModelProviderUnavailable,
@@ -813,9 +813,9 @@ def test_openai_count_tokens_matches_create_options_and_uses_lru_cache():
 
 
 def test_gemini_budgeted_runtime_enforces_profile_token_compression_limits(tmp_path):
-    from wechat_agent.mock import SystemClock
-    from wechat_agent.storage import Repository
-    from wechat_agent.usage import UsageLedger
+    from echoloom.mock import SystemClock
+    from echoloom.storage import Repository
+    from echoloom.usage import UsageLedger
 
     class FakeGeminiLlm(BaseLlm):
         _requests: list = PrivateAttr(default_factory=list)

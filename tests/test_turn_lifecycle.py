@@ -13,22 +13,22 @@ import pytest
 from google.genai import types
 from test_openai_runtime import FakeAdkModel
 
-from wechat_agent.contacts import ContactIdentity
-from wechat_agent.context import ContextTurn, ContextWindow
-from wechat_agent.context_assembler import MessageContextAssembler
-from wechat_agent.cross_session import CrossSessionService
-from wechat_agent.cross_session_tools import CrossSessionToolset
-from wechat_agent.event_book import EventBook
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.hook_outbound import HookTextSender
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.mock import SystemClock
-from wechat_agent.models import ConversationKey
-from wechat_agent.pilot import Pilot
-from wechat_agent.runtime_contract import ToolContext
-from wechat_agent.session_runtime import ScopedAgentRuntime
-from wechat_agent.tool_timing import turn_deadline_monotonic
-from wechat_agent.wechat_tools import (
+from echoloom.contacts import ContactIdentity
+from echoloom.context import ContextTurn, ContextWindow
+from echoloom.context_assembler import MessageContextAssembler
+from echoloom.cross_session import CrossSessionService
+from echoloom.cross_session_tools import CrossSessionToolset
+from echoloom.event_book import EventBook
+from echoloom.hook_contract import HookObservation
+from echoloom.hook_outbound import HookTextSender
+from echoloom.memory_store import MemoryStore
+from echoloom.mock import SystemClock
+from echoloom.models import ConversationKey
+from echoloom.pilot import Pilot
+from echoloom.runtime_contract import ToolContext
+from echoloom.session_runtime import ScopedAgentRuntime
+from echoloom.tool_timing import turn_deadline_monotonic
+from echoloom.wechat_tools import (
     WeChatTools,
     active_conversation,
     memory_context,
@@ -209,7 +209,7 @@ def test_sdk_cross_session_replay_keeps_partial_updates_and_sends_once(tmp_path)
 
 def test_mutation_receipt_failure_rolls_back_then_retry_writes_once(tmp_path):
     from google.adk.tools.tool_context import ToolContext as AdkToolContext
-    from wechat_agent.frameworks.adk import to_adk
+    from echoloom.frameworks.adk import to_adk
 
     async def scenario():
         store, tools, sender, pilot, _, requests = setup_chain(tmp_path)
@@ -238,7 +238,7 @@ def test_mutation_receipt_failure_rolls_back_then_retry_writes_once(tmp_path):
 
 
 def test_failed_update_group_does_not_block_valid_group_or_reply(tmp_path):
-    from wechat_agent.frameworks.adk import to_adk
+    from echoloom.frameworks.adk import to_adk
 
     async def scenario():
         store, tools, sender, pilot, _, requests = setup_chain(tmp_path)
@@ -307,7 +307,7 @@ def test_rebatch_preserves_three_retry_cap(tmp_path):
 @pytest.mark.parametrize("web_enabled", [True, False])
 def test_production_bootstrap_uses_configured_route_and_shared_tools(tmp_path, monkeypatch, web_enabled):
     """Run the real composition root, without starting a server or using credentials."""
-    from wechat_agent import bootstrap
+    from echoloom import bootstrap
 
     (tmp_path / "data").mkdir()
     (tmp_path / "config").mkdir()
@@ -384,7 +384,7 @@ def test_production_bootstrap_uses_configured_route_and_shared_tools(tmp_path, m
 
 def test_run_group_pilot_cli_forwards_to_bootstrap(tmp_path, monkeypatch):
     """Thin CLI scripts/run-group-pilot.py preserves --run and --role forwarding."""
-    from wechat_agent import bootstrap
+    from echoloom import bootstrap
 
     spec = importlib.util.spec_from_file_location("pilot_cli_test", "scripts/run-group-pilot.py")
     cli = importlib.util.module_from_spec(spec)

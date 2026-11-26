@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / ".tmp/native-image-analysis-deps"))
 import httpx
 from PIL import Image
 
-from wechat_agent.native_image_download import MAX_BYTES, MD5
+from echoloom.native_image_download import MAX_BYTES, MD5
 
 DLL_SHA = "f487e4f56930456a25fb0d7b058c77e2dcd364e268d49bdfff4dc0e3be26ba36"
 HEX64 = re.compile(r"[0-9a-f]{64}")

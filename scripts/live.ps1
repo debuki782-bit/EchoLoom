@@ -10,7 +10,7 @@ if(-not $python){
     if($cmd){$python=$cmd.Source}
 }
 if(-not $python){throw 'Python executable not found; create .venv/.venv-openai or set ECHOLOOM_PYTHON'}
-$runtimeMetaJson=& $python -m wechat_agent.local_config runtime-json 2>$null
+$runtimeMetaJson=& $python -m echoloom.local_config runtime-json 2>$null
 $runtimeMeta=if($LASTEXITCODE -eq 0 -and $runtimeMetaJson){$runtimeMetaJson | ConvertFrom-Json}else{$null}
 $srvCfg=if($runtimeMeta -and $runtimeMeta.server){$runtimeMeta.server}else{[pscustomobject]@{ingress_host='127.0.0.1';ingress_port=8080}}
 $ingressHost=if($env:WECHAT_AGENT_HOST){$env:WECHAT_AGENT_HOST}elseif($srvCfg.ingress_host){[string]$srvCfg.ingress_host}else{'127.0.0.1'}
@@ -21,7 +21,7 @@ $hookPort=([Uri](if($hookCfg.hook_url){[string]$hookCfg.hook_url}else{'http://12
 $nativeDownloadStatusUrl=((if($hookCfg.native_download_url){[string]$hookCfg.native_download_url}else{'http://127.0.0.1:30002'}).TrimEnd('/') + '/status')
 $configuredFactory=if($env:ECHOLOOM_GATEWAY_FACTORY){$env:ECHOLOOM_GATEWAY_FACTORY}else{$env:WECHAT_GATEWAY_FACTORY}
 $usesWechatSource=if($configuredFactory){
-    $configuredFactory -in @('wechat_agent.adapters.hook:HookGateway','wechat_agent.connectors.wechat_hook:WeChatHookConnector')
+    $configuredFactory -in @('echoloom.adapters.hook:HookGateway','echoloom.connectors.wechat_hook:WeChatHookConnector')
 }elseif($runtimeMeta -and $runtimeMeta.sources -and $runtimeMeta.sources.Count -gt 0){
     @($runtimeMeta.sources) -contains 'wechat'
 }else{

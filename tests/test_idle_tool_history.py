@@ -1,9 +1,9 @@
 import sqlite3
 from datetime import UTC, datetime
 
-from wechat_agent.idle_tools import IdleActivityToolset
-from wechat_agent.time_scheduler import TimeScheduler
-from wechat_agent.tool_timing import _record_idle_tool, adk_function_tool
+from echoloom.idle_tools import IdleActivityToolset
+from echoloom.time_scheduler import TimeScheduler
+from echoloom.tool_timing import _record_idle_tool, adk_function_tool
 
 
 def test_idle_summary_persists_only_successful_calls_and_partial_bundle(tmp_path):

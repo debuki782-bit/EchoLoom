@@ -3,11 +3,11 @@ import json
 
 from fastapi.testclient import TestClient
 
-from wechat_agent import tool_policy
-from wechat_agent.tool_timing import adk_function_tool
-from wechat_agent.toolsets import MediaToolset, MemoryToolset, ReplyToolset
-from wechat_agent.trace_dashboard import _tool_names, _transcript, create_trace_dashboard
-from wechat_agent.wechat_tools import WeChatTools
+from echoloom import tool_policy
+from echoloom.tool_timing import adk_function_tool
+from echoloom.toolsets import MediaToolset, MemoryToolset, ReplyToolset
+from echoloom.trace_dashboard import _tool_names, _transcript, create_trace_dashboard
+from echoloom.wechat_tools import WeChatTools
 
 
 def test_dashboard_trace_filters_and_live_tool_switch(tmp_path, monkeypatch):

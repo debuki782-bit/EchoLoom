@@ -8,13 +8,13 @@ import pytest
 from google import genai
 from google.genai import types
 
-from wechat_agent.frameworks.adk_budget import BudgetedAdkModel
-from wechat_agent.frameworks.google_web import GoogleWebModel
-from wechat_agent.mock import SystemClock
-from wechat_agent.runtime_scope import model_usage_scope
-from wechat_agent.storage import Repository
-from wechat_agent.usage import UsageLedger
-from wechat_agent.web_tools import WebSearchUsage, WebToolset
+from echoloom.frameworks.adk_budget import BudgetedAdkModel
+from echoloom.frameworks.google_web import GoogleWebModel
+from echoloom.mock import SystemClock
+from echoloom.runtime_scope import model_usage_scope
+from echoloom.storage import Repository
+from echoloom.usage import UsageLedger
+from echoloom.web_tools import WebSearchUsage, WebToolset
 
 
 def exercise(tmp_path, *, search=True, queries=None, urls=None, budget=4_000_000,

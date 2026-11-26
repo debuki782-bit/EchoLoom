@@ -19,12 +19,12 @@ from unittest.mock import AsyncMock
 import httpx
 from fastapi.testclient import TestClient
 
-from wechat_agent.conversation_scheduler import ConversationScheduler
-from wechat_agent.dispatcher import Dispatcher
-from wechat_agent.ingress import Ingress, create_ingress_app, sha
-from wechat_agent.models import ReplyDraft
-from wechat_agent.pilot import Pilot
-from wechat_agent.wechat_gateway import MessageEvent, SendResult
+from echoloom.conversation_scheduler import ConversationScheduler
+from echoloom.dispatcher import Dispatcher
+from echoloom.ingress import Ingress, create_ingress_app, sha
+from echoloom.models import ReplyDraft
+from echoloom.pilot import Pilot
+from echoloom.wechat_gateway import MessageEvent, SendResult
 
 ROOT = Path(__file__).resolve().parents[1]
 ACCOUNT = "wxid_bot_scheme_a"
@@ -101,7 +101,7 @@ def test_run_ingress_imports_zero_llm_sdks(tmp_path: Path, monkeypatch) -> None:
         "mod = importlib.util.module_from_spec(spec)\n"
         "spec.loader.exec_module(mod)\n"
         "forbidden = ('google.adk', 'google.genai', 'openai', 'agents', "
-        "'wechat_agent.episode_memory', 'wechat_agent.session_runtime')\n"
+        "'echoloom.episode_memory', 'echoloom.session_runtime')\n"
         "found = sorted(m for m in sys.modules if any(m == f or m.startswith(f + '.') for f in forbidden))\n"
         "print(json.dumps(found))\n"
     )

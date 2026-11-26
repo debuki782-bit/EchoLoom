@@ -14,18 +14,18 @@ import httpx
 import pytest
 from PIL import Image
 
-from wechat_agent.contacts import ContactIdentity
-from wechat_agent.context import ContextTurn
-from wechat_agent.context_builder import BuiltContext, ContextBuilder, ContextSpec
-from wechat_agent.cross_session import CrossSessionService
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.hook_outbound import HookSendResult
-from wechat_agent.media import WeChatImageIngestor
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.message_ingestor import IngestedBatch, MessageIngestor
-from wechat_agent.pilot import Pilot
-from wechat_agent.rich_message import normalize_message
-from wechat_agent.time_scheduler import TimeScheduler
+from echoloom.contacts import ContactIdentity
+from echoloom.context import ContextTurn
+from echoloom.context_builder import BuiltContext, ContextBuilder, ContextSpec
+from echoloom.cross_session import CrossSessionService
+from echoloom.hook_contract import HookObservation
+from echoloom.hook_outbound import HookSendResult
+from echoloom.media import WeChatImageIngestor
+from echoloom.memory_store import MemoryStore
+from echoloom.message_ingestor import IngestedBatch, MessageIngestor
+from echoloom.pilot import Pilot
+from echoloom.rich_message import normalize_message
+from echoloom.time_scheduler import TimeScheduler
 
 
 def _obs(
@@ -539,7 +539,7 @@ def test_cross_session_dispatch_to_pilot_builds_context_window_only_once(tmp_pat
 
 
 def test_layer4_context_modules_have_no_hardcoded_hook_endpoints():
-    root = Path(__file__).resolve().parents[1] / "src" / "wechat_agent"
+    root = Path(__file__).resolve().parents[1] / "src" / "echoloom"
     for name in (
         "message_ingestor.py",
         "context_builder.py",

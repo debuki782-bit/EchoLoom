@@ -1,9 +1,9 @@
 import asyncio
 
-from wechat_agent.context import ContextWindow, _record_turn
-from wechat_agent.context_assembler import MessageContextAssembler
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.memory_store import MemoryStore
+from echoloom.context import ContextWindow, _record_turn
+from echoloom.context_assembler import MessageContextAssembler
+from echoloom.hook_contract import HookObservation
+from echoloom.memory_store import MemoryStore
 
 
 def observed(text: str, tick: int) -> HookObservation:

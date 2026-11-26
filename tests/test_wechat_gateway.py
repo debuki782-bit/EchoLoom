@@ -11,18 +11,18 @@ import httpx
 import pytest
 from PIL import Image
 
-from wechat_agent.adapters.hook import HookGateway
-from wechat_agent.contacts import ContactIdentity
-from wechat_agent.context_assembler import MessageContextAssembler
-from wechat_agent.conversation_scheduler import ConversationScheduler
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.hook_outbound import HookSendResult
-from wechat_agent.media import WeChatImageIngestor, WeChatVoiceIngestor, image_for_model
-from wechat_agent.memory_store import MemoryStore
-from wechat_agent.mock import SystemClock
-from wechat_agent.models import ConversationKey, ReplyDraft
-from wechat_agent.pilot import Pilot, create_pilot_app
-from wechat_agent.wechat_gateway import (
+from echoloom.adapters.hook import HookGateway
+from echoloom.contacts import ContactIdentity
+from echoloom.context_assembler import MessageContextAssembler
+from echoloom.conversation_scheduler import ConversationScheduler
+from echoloom.hook_contract import HookObservation
+from echoloom.hook_outbound import HookSendResult
+from echoloom.media import WeChatImageIngestor, WeChatVoiceIngestor, image_for_model
+from echoloom.memory_store import MemoryStore
+from echoloom.mock import SystemClock
+from echoloom.models import ConversationKey, ReplyDraft
+from echoloom.pilot import Pilot, create_pilot_app
+from echoloom.wechat_gateway import (
     GatewayConfig,
     MessageEvent,
     SendResult,
@@ -30,7 +30,7 @@ from wechat_agent.wechat_gateway import (
     WeChatGateway,
     create_gateway,
 )
-from wechat_agent.wechat_tools import WeChatTools, operation_id, quote_context
+from echoloom.wechat_tools import WeChatTools, operation_id, quote_context
 
 ACCOUNT, ROOM, MEMBER = "wxid_bot_example", "example@chatroom", "wxid_member_example"
 
@@ -44,7 +44,7 @@ def event(*, source_id=9001, message_type=1, text="hello"):
 def recording(root):
     return create_gateway(GatewayConfig(root, account_id=ACCOUNT, send_enabled=True,
         allowed_conversations=frozenset({ConversationKey(ACCOUNT, ROOM)})),
-        factory="wechat_agent.adapters.recording:RecordingGateway")
+        factory="echoloom.adapters.recording:RecordingGateway")
 
 
 def png():
@@ -279,7 +279,7 @@ def test_hook_backend_preserves_wire_requests_and_account_verification(tmp_path)
 
 
 def test_business_modules_do_not_embed_hook_endpoints():
-    root = Path(__file__).parents[1] / "src/wechat_agent"
+    root = Path(__file__).parents[1] / "src/echoloom"
     module_paths = [
         root / name
         for name in (

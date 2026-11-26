@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
-from wechat_agent.cross_session import CrossSessionService
-from wechat_agent.memory_store import MemoryStore
+from echoloom.cross_session import CrossSessionService
+from echoloom.memory_store import MemoryStore
 
 
 def _archive(store, account, conversation, sender, body):

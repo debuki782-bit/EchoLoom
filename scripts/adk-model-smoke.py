@@ -9,14 +9,14 @@ from google import genai
 from google.adk.models.google_llm import Gemini
 from google.genai import types
 
-from wechat_agent.adk_budget import BudgetedAdkModel
-from wechat_agent.adk_runner import ScopedAdkRunner
-from wechat_agent.agent_tools import AgentToolStatus
-from wechat_agent.context import ContextTurn, ContextWindow
-from wechat_agent.credentials import load_key
-from wechat_agent.mock import SystemClock
-from wechat_agent.storage import Repository
-from wechat_agent.usage import UsageLedger
+from echoloom.adk_budget import BudgetedAdkModel
+from echoloom.adk_runner import ScopedAdkRunner
+from echoloom.agent_tools import AgentToolStatus
+from echoloom.context import ContextTurn, ContextWindow
+from echoloom.credentials import load_key
+from echoloom.mock import SystemClock
+from echoloom.storage import Repository
+from echoloom.usage import UsageLedger
 
 ROOT = Path(__file__).resolve().parents[1]
 

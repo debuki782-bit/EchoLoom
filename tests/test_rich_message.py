@@ -1,7 +1,7 @@
 import json
 
-from wechat_agent.hook_contract import HookObservation
-from wechat_agent.rich_message import normalize_message, quoted_author_id
+from echoloom.hook_contract import HookObservation
+from echoloom.rich_message import normalize_message, quoted_author_id
 
 
 def test_quote_separates_source_chat_from_exact_quoted_author_id():

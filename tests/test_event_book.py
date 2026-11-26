@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
-from wechat_agent.event_book import EventBook
-from wechat_agent.memory_store import MemoryStore
+from echoloom.event_book import EventBook
+from echoloom.memory_store import MemoryStore
 
 
 def test_event_book_enforces_priority_slots_character_caps_and_exit_rules(tmp_path):

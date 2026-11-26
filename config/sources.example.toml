@@ -10,7 +10,7 @@ default_source = "webhook"
 
 [sources.webhook]
 enabled = true
-factory = "wechat_agent.connectors.webhook:WebhookConnector"
+factory = "echoloom.connectors.webhook:WebhookConnector"
 channel = "webhook"
 account_id = "bot_local"
 default_conversation_id = "room:general"
@@ -20,10 +20,42 @@ outbound_url = ""
 auth_token_env = "ECHOLOOM_WEBHOOK_SECRET"
 send_enabled = false
 
+# Optional Telegram Bot API connector:
+# [sources.telegram]
+# enabled = false
+# factory = "echoloom.connectors.telegram:TelegramConnector"
+# channel = "telegram"
+# account_id = "telegram-bot"
+# auth_token_env = "ECHOLOOM_TELEGRAM_BOT_TOKEN"
+# hmac_secret_env = "ECHOLOOM_TELEGRAM_SECRET_TOKEN"
+# send_enabled = true
+
+# Optional Feishu / Lark Open Platform connector:
+# [sources.feishu]
+# enabled = false
+# factory = "echoloom.connectors.feishu:FeishuConnector"
+# channel = "feishu"
+# account_id = "feishu-bot"
+# auth_token_env = "ECHOLOOM_FEISHU_TENANT_TOKEN"
+# send_enabled = true
+# [sources.feishu.options]
+# app_id = ""
+# app_secret = ""
+# verification_token = ""
+
+# Optional Discord Bot REST / relay connector:
+# [sources.discord]
+# enabled = false
+# factory = "echoloom.connectors.discord:DiscordConnector"
+# channel = "discord"
+# account_id = "discord-bot"
+# auth_token_env = "ECHOLOOM_DISCORD_BOT_TOKEN"
+# send_enabled = true
+
 # Example optional WeChat Hook connector (Windows desktop hook plugin):
 # [sources.wechat]
 # enabled = false
-# factory = "wechat_agent.connectors.wechat_hook:WeChatHookConnector"
+# factory = "echoloom.connectors.wechat_hook:WeChatHookConnector"
 # channel = "wechat"
 # base_url = "http://127.0.0.1:30001"
 # native_download_url = "http://127.0.0.1:30002"

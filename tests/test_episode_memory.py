@@ -8,8 +8,8 @@ from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from pydantic import PrivateAttr
 
-from wechat_agent.context import ContextTurn, ContextWindow
-from wechat_agent.episode_memory import (
+from echoloom.context import ContextTurn, ContextWindow
+from echoloom.episode_memory import (
     DIMENSIONS,
     EpisodeDraft,
     EpisodeMemory,
@@ -17,10 +17,10 @@ from wechat_agent.episode_memory import (
     RecallTurn,
     recall_turn,
 )
-from wechat_agent.mock import SystemClock
-from wechat_agent.runtime_scope import model_usage_scope
-from wechat_agent.storage import Repository
-from wechat_agent.usage import UsageLedger
+from echoloom.mock import SystemClock
+from echoloom.runtime_scope import model_usage_scope
+from echoloom.storage import Repository
+from echoloom.usage import UsageLedger
 
 
 class _FakeCuratorLlm(BaseLlm):
@@ -96,7 +96,7 @@ def test_episode_ingest_recall_scope_and_timeout(tmp_path, monkeypatch):
                 await asyncio.sleep(10)
 
             embed.side_effect = slow
-            monkeypatch.setattr("wechat_agent.episode_memory.AUTO_SECONDS", 0.02)
+            monkeypatch.setattr("echoloom.episode_memory.AUTO_SECONDS", 0.02)
             waiting = turn("room", "waiting")
             await asyncio.wait_for(memory.automatic(waiting), timeout=1)
             assert waiting.automatic == []

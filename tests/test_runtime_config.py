@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from wechat_agent import prompt_catalog
-from wechat_agent.agent_profiles import load_agent_profiles
-from wechat_agent.model_overrides import ModelOverrideStore, parse_model_command
-from wechat_agent.storage import Repository
-from wechat_agent.usage import UsageLedger
+from echoloom import prompt_catalog
+from echoloom.agent_profiles import load_agent_profiles
+from echoloom.model_overrides import ModelOverrideStore, parse_model_command
+from echoloom.storage import Repository
+from echoloom.usage import UsageLedger
 
 
 def test_live_profile_models_and_daily_caps() -> None:
@@ -32,7 +32,7 @@ def test_live_profile_models_and_daily_caps() -> None:
 
 
 def test_context_limits_inherit_and_can_be_overridden(tmp_path):
-    from wechat_agent.agent_profiles import PROFILE_PATH
+    from echoloom.agent_profiles import PROFILE_PATH
     config = tmp_path / "profiles.toml"
     config.write_text(PROFILE_PATH.read_text('utf-8') + '''
 [profiles.lab]
@@ -48,7 +48,7 @@ active_compression_tokens = 100000
 
 @pytest.mark.parametrize('replacement', ['true', '-1', '96000', '128001'])
 def test_invalid_context_limit_is_rejected_before_loading(tmp_path, replacement):
-    from wechat_agent.agent_profiles import PROFILE_PATH
+    from echoloom.agent_profiles import PROFILE_PATH
     config = tmp_path / "profiles.toml"
     config.write_text(PROFILE_PATH.read_text('utf-8').replace(
         'idle_compression_tokens = 64000', 'idle_compression_tokens = ' + replacement,
@@ -128,7 +128,7 @@ def test_account_feature_budget_is_shared_between_profiles(tmp_path: Path) -> No
 
 
 def test_local_agent_profiles_override_when_enabled(tmp_path: Path, monkeypatch) -> None:
-    from wechat_agent import agent_profiles
+    from echoloom import agent_profiles
 
     repo_root = Path(__file__).resolve().parents[1]
     base_text = (repo_root / "config" / "agent_profiles.toml").read_text(encoding="utf-8")
@@ -153,7 +153,7 @@ def test_local_agent_profiles_override_when_enabled(tmp_path: Path, monkeypatch)
 
 def test_local_prompt_dir_overrides_and_falls_back(tmp_path: Path, monkeypatch) -> None:
     import shutil
-    from wechat_agent import prompt_catalog
+    from echoloom import prompt_catalog
 
     repo_prompts = Path(__file__).resolve().parents[1] / "prompts"
     base_prompts = tmp_path / "prompts"
@@ -176,7 +176,7 @@ def test_local_prompt_dir_overrides_and_falls_back(tmp_path: Path, monkeypatch) 
 
 
 def test_profile_rollover_and_output_limits_inherit_override_and_validate(tmp_path: Path) -> None:
-    from wechat_agent.agent_profiles import PROFILE_PATH
+    from echoloom.agent_profiles import PROFILE_PATH
 
     config = tmp_path / "profiles.toml"
     base = PROFILE_PATH.read_text("utf-8")
@@ -228,7 +228,7 @@ def test_model_catalog_loads_base_overrides_and_rate_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import shutil
-    from wechat_agent import local_config, model_catalog
+    from echoloom import local_config, model_catalog
 
     repo_root = Path(__file__).resolve().parents[1]
     shutil.copytree(repo_root / "config", tmp_path / "config")
@@ -264,7 +264,7 @@ def test_model_catalog_loads_base_overrides_and_rate_tiers(
 def test_explicit_utc_timezone_in_local_runtime_is_honored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from wechat_agent import local_config, temporal_context
+    from echoloom import local_config, temporal_context
 
     (tmp_path / ".local").mkdir()
     (tmp_path / ".local" / "runtime.toml").write_text(

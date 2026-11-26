@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from wechat_agent.hook_contract import parse_callback
+from echoloom.hook_contract import parse_callback
 
 
 def fixture() -> dict[str, object]:

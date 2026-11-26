@@ -3,9 +3,9 @@ import json
 
 import httpx
 
-from wechat_agent.bilibili import BilibiliReader
-from wechat_agent.rich_message import normalize_message
-from wechat_agent.wechat_gateway import MessageEvent
+from echoloom.bilibili import BilibiliReader
+from echoloom.rich_message import normalize_message
+from echoloom.wechat_gateway import MessageEvent
 
 
 def test_long_shared_card_keeps_destination_but_not_attachment_secrets():

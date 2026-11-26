@@ -2,7 +2,7 @@
 
 import json
 
-from wechat_agent.trace_view import load_records, render, summarize
+from echoloom.trace_view import load_records, render, summarize
 
 
 def _write(path, records):

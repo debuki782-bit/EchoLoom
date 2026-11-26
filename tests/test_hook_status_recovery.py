@@ -1,9 +1,9 @@
 import asyncio
 from pathlib import Path
 
-from wechat_agent.hook_status_recovery import observation_from_hook_status
-from wechat_agent.hook_outbound import HookSendResult
-from wechat_agent.pilot import Pilot
+from echoloom.hook_status_recovery import observation_from_hook_status
+from echoloom.hook_outbound import HookSendResult
+from echoloom.pilot import Pilot
 
 
 ACCOUNT = "wxid_bot_account"

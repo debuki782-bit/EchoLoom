@@ -49,7 +49,7 @@ if (-not $AdapterDll) {
     $AdapterDll = Join-Path $taskRoot '.runtime/native-image-download/wx_image_download_411027.dll'
 }
 $AdapterDll = (Resolve-Path -LiteralPath $AdapterDll).Path
-$taskAccount = (& $taskPython -c "from pathlib import Path; from wechat_agent.bootstrap import load_live_route; print(load_live_route(Path(r'$taskRoot')).account)" 2>$null | Select-Object -First 1)
+$taskAccount = (& $taskPython -c "from pathlib import Path; from echoloom.bootstrap import load_live_route; print(load_live_route(Path(r'$taskRoot')).account)" 2>$null | Select-Object -First 1)
 if (-not $taskAccount -and (Test-Path -LiteralPath (Join-Path $taskRoot 'data/live-route.json') -PathType Leaf)) {
     $taskRoute = Get-Content -Raw -LiteralPath (Join-Path $taskRoot 'data/live-route.json') | ConvertFrom-Json
     $taskAccount = [string]$taskRoute.account
