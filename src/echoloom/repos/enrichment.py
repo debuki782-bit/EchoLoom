@@ -67,6 +67,7 @@ def enrich_context_messages(
     jev_by_message: dict[str, dict[str, object]] = {}
     images_by_message: dict[str, dict[str, object]] = {}
     audio_by_message: dict[str, dict[str, object]] = {}
+    files_by_message: dict[str, dict[str, object]] = {}
     with lock:
         if message_ids:
             notes_by_message = knowledge.notes_for_messages(
@@ -85,12 +86,17 @@ def enrich_context_messages(
                 account_id=account_id,
                 message_ids=message_ids,
             )
+            files_by_message = media.file_metadata_for_messages(
+                account_id=account_id,
+                message_ids=message_ids,
+            )
     search_texts = []
     for item in messages:
         message_id = item.get("message_id")
         key = message_id if isinstance(message_id, str) else ""
         base_image = item.get("image")
         base_audio = item.get("audio")
+        base_file = item.get("file")
         image = {
             **(dict(base_image) if isinstance(base_image, Mapping) else {}),
             **images_by_message.get(key, {}),
@@ -98,6 +104,10 @@ def enrich_context_messages(
         audio = {
             **(dict(base_audio) if isinstance(base_audio, Mapping) else {}),
             **audio_by_message.get(key, {}),
+        }
+        file_meta = {
+            **(dict(base_file) if isinstance(base_file, Mapping) else {}),
+            **files_by_message.get(key, {}),
         }
         search_texts.append(
             "\n".join(
@@ -107,6 +117,8 @@ def enrich_context_messages(
                     item.get("body_text"),
                     (image or {}).get("vision_summary"),
                     (audio or {}).get("transcript"),
+                    (file_meta or {}).get("filename"),
+                    (file_meta or {}).get("summary"),
                 )
                 if value
             )[:12000]
@@ -174,6 +186,11 @@ def enrich_context_messages(
                     **audio_by_message.get(cache_key or "", {}),
                 }
                 or None,
+                "file": {
+                    **(dict(item["file"]) if isinstance(item.get("file"), Mapping) else {}),
+                    **files_by_message.get(cache_key or "", {}),
+                }
+                or None,
             }
         )
         if cache_key:
@@ -189,6 +206,7 @@ def enrich_context_messages(
                     "sender_gap_minutes",
                     "image",
                     "audio",
+                    "file",
                 )
             }
         enriched.append(data)

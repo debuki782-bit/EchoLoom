@@ -21,7 +21,7 @@ from .contacts import is_contact_id, is_room_id
 from .conversation_scheduler import ConversationScheduler
 from .db_async import db_lock, register_thread_safe_db, run_db, unregister_thread_safe_db
 from .gateway_ingress import bounded_body as _bounded_body
-from .rich_message import normalize_message
+from .rich_message import normalize_message, normalized_file_metadata
 from .temporal_context import message_time_context
 from .wechat_gateway import MessageEvent, default_event_parser
 
@@ -211,6 +211,12 @@ class Ingress:
             normalized = normalize_message(item)
         if normalized is None:
             return self._offer_result(item, "observation_only")
+        file_meta = normalized_file_metadata(normalized.text)
+        if file_meta is not None and file_meta.get("kind") == "file_upload_notice":
+            # WeChat emits an upload-in-progress placeholder (app_type=74) right before
+            # the completed app_type=6 file card; drop the placeholder so one file only
+            # enters the inbox once and cannot wake a premature turn.
+            return self._offer_result(normalized, "observation_only")
         item = normalized
         if (
             item.is_group

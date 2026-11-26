@@ -1,6 +1,6 @@
 """Google ADK adapter for the application-owned conversation runtime."""
-from contextvars import ContextVar
 import inspect
+from contextvars import ContextVar
 from functools import wraps
 from types import SimpleNamespace
 
@@ -18,11 +18,12 @@ from google.genai import types
 
 from ..episode_memory import SEARCH_TOOL
 from ..runtime_contract import (
+    BudgetExhausted,
     ModelCallIndeterminate,
     ModelCallsLimitExceeded,
     ModelProviderUnavailable,
-    Part as RuntimePart,
 )
+from ..runtime_contract import Part as RuntimePart
 from ..turn_scope import is_turn_freshness_held
 
 _call_budget_state: ContextVar[list[int] | None] = ContextVar(
@@ -287,15 +288,14 @@ class _Runner:
                 )
         except LlmCallsLimitExceededError as exc:
             raise ModelCallsLimitExceeded(str(exc)) from exc
-        except ModelProviderUnavailable as exc:
+        except (ModelProviderUnavailable, ModelCallIndeterminate, BudgetExhausted) as exc:
             if not progressed and invocation_id is not None:
                 await self.delegate.rewind_async(
                     user_id=kwargs["user_id"],
                     session_id=kwargs["session_id"],
                     rewind_before_invocation_id=invocation_id,
                 )
-                raise
-            if progressed:
+            if isinstance(exc, ModelProviderUnavailable) and progressed:
                 raise ModelCallIndeterminate(
                     "ADK provider became unavailable after turn progress"
                 ) from exc

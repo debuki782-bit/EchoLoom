@@ -116,6 +116,13 @@ def tool_memory_context(window: ContextWindow) -> dict[str, object]:
         )
     )
     current_ids = tuple(turn.message_id for turn in window.turns if turn in visible)
+    current_senders = tuple(
+        dict.fromkeys(
+            turn.sender_id
+            for turn in window.turns
+            if turn in visible and turn.direction != "outbound" and turn.sender_id
+        )
+    )
     conversations = {
         turn.message_id: turn.source_conversation_id or window.conversation_id
         for turn in visible
@@ -138,6 +145,8 @@ def tool_memory_context(window: ContextWindow) -> dict[str, object]:
         "conversation_id": window.conversation_id,
         "message_id": current_ids[-1] if current_ids else "",
         "current_message_ids": current_ids,
+        "current_sender_ids": current_senders,
+        "is_idle_event": bool(window.is_idle_event),
         "message_ids": tuple(dict.fromkeys(turn.message_id for turn in visible)),
         "message_conversations": conversations,
         "context_window": window,
@@ -155,6 +164,25 @@ def tool_memory_context(window: ContextWindow) -> dict[str, object]:
             sorted(set(conversations.values()) | {window.conversation_id})
         ),
     }
+
+
+def current_turn_owner_authorized(
+    command_owner_ids: frozenset[str] | set[str],
+) -> tuple[bool, str]:
+    """Allow privileged file writes/sends only when every human sender in the turn is a configured owner."""
+    if not command_owner_ids:
+        return False, "owner_ids_not_configured"
+    ctx = memory_context.get()
+    if not ctx:
+        return False, "turn_context_unavailable"
+    if ctx.get("is_idle_event"):
+        return False, "idle_turn_cannot_run_owner_action"
+    senders = ctx.get("current_sender_ids")
+    if not isinstance(senders, (tuple, list)) or not senders:
+        return False, "no_current_human_sender"
+    if any(not isinstance(sid, str) or sid not in command_owner_ids for sid in senders):
+        return False, "owner_permission_required"
+    return True, "ok"
 
 
 @contextmanager

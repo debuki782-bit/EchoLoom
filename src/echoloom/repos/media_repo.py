@@ -1,4 +1,4 @@
-"""Repository owning message_media, image_library_revisions, and message_audio."""
+"""Repository owning message_media, image_library_revisions, message_audio, and message_files."""
 
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ class MediaRepo:
         *,
         media_root: Path,
         audio_root: Path,
+        file_root: Path | None = None,
         messages: MessageRepo | None = None,
         knowledge: KnowledgeRepo | None = None,
     ) -> None:
@@ -50,6 +51,11 @@ class MediaRepo:
         self._transaction = transaction_fn
         self.media_root = media_root
         self.audio_root = audio_root
+        self.file_root = (
+            file_root.resolve()
+            if file_root is not None
+            else (media_root.parent / "received-files").resolve()
+        )
         self._messages = messages
         self._knowledge = knowledge
 
@@ -946,7 +952,7 @@ class MediaRepo:
             )
 
     def purge_for_message(self, *, message_id: str, now: str) -> None:
-        """Delete media/audio artifacts for one expired message inside a transaction."""
+        """Delete media/audio/file artifacts for one expired message inside a transaction."""
         media = self.db.execute(
             "SELECT artifact_path FROM message_media WHERE message_id=?",
             (message_id,),
@@ -971,3 +977,382 @@ class MediaRepo:
             "UPDATE message_audio SET state='deleted',updated_at=? WHERE message_id=?",
             (now, message_id),
         )
+        file_row = self.db.execute(
+            "SELECT artifact_path FROM message_files WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+        if file_row and file_row["artifact_path"]:
+            artifact = Path(file_row["artifact_path"]).resolve()
+            if artifact.is_relative_to(self.file_root):
+                artifact.unlink(missing_ok=True)
+        self.db.execute(
+            "UPDATE message_files SET state='deleted',updated_at=? WHERE message_id=?",
+            (now, message_id),
+        )
+
+    _FILE_PUBLIC_COLUMNS = (
+        "file_id,account_id,conversation_id,message_id,filename,fileext,"
+        "expected_bytes,expected_md5,state,mime_type,byte_count,sha256,"
+        "error_code,summary,summary_model_id,summarized_at,created_at,updated_at"
+    )
+
+    def begin_file_ingest(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        message_id: str,
+        original_references: Sequence[dict[str, str]],
+        filename: str,
+        fileext: str = "",
+        expected_bytes: int | None = None,
+        expected_md5: str | None = None,
+    ) -> dict[str, object]:
+        if not self._message_in_scope(message_id, account_id):
+            raise KeyError("source message unavailable")
+        clean_name = _bounded_text(filename, 512) if filename.strip() else "unnamed"
+        clean_ext = fileext.strip().lstrip(".").casefold()[:32]
+        refs_json = json.dumps(list(original_references), ensure_ascii=False, separators=(",", ":"))
+        with self._transaction():
+            row = self.db.execute(
+                f"SELECT {self._FILE_PUBLIC_COLUMNS},artifact_path FROM message_files "
+                "WHERE message_id=? AND account_id=? AND conversation_id=?",
+                (message_id, account_id, conversation_id),
+            ).fetchone()
+            if row is not None:
+                return dict(row)
+            file_id = (
+                "fil_"
+                + hashlib.sha256(
+                    f"{account_id}\0{conversation_id}\0{message_id}".encode()
+                ).hexdigest()[:24]
+            )
+            now = _now()
+            self.db.execute(
+                "INSERT INTO message_files "
+                "(file_id,account_id,conversation_id,message_id,original_references_json,"
+                "filename,fileext,expected_bytes,expected_md5,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?)",
+                (
+                    file_id,
+                    account_id,
+                    conversation_id,
+                    message_id,
+                    refs_json,
+                    clean_name,
+                    clean_ext,
+                    expected_bytes,
+                    expected_md5,
+                    now,
+                    now,
+                ),
+            )
+            return dict(
+                self.db.execute(
+                    f"SELECT {self._FILE_PUBLIC_COLUMNS},artifact_path FROM message_files WHERE file_id=?",
+                    (file_id,),
+                ).fetchone()
+            )
+
+    def complete_file_ingest(
+        self,
+        *,
+        file_id: str,
+        account_id: str,
+        artifact_path: str,
+        mime_type: str,
+        byte_count: int,
+        sha256: str,
+    ) -> None:
+        if byte_count <= 0 or len(sha256) != 64:
+            raise ValueError("invalid file metadata")
+        with self._transaction():
+            cur = self.db.execute(
+                "UPDATE message_files SET state='ready',artifact_path=?,mime_type=?,"
+                "byte_count=?,sha256=?,error_code=NULL,updated_at=? "
+                "WHERE file_id=? AND account_id=? AND state='pending'",
+                (artifact_path, mime_type[:120], byte_count, sha256, _now(), file_id, account_id),
+            )
+            if not cur.rowcount:
+                raise KeyError("pending file ingest unavailable")
+
+    def fail_file_ingest_for_message(
+        self,
+        *,
+        account_id: str,
+        message_id: str,
+        error_code: str,
+        filename: str = "unnamed",
+        fileext: str = "",
+        expected_bytes: int | None = None,
+        expected_md5: str | None = None,
+    ) -> dict[str, object]:
+        if not error_code or len(error_code) > 64:
+            raise ValueError("invalid file failure code")
+        if not self._message_in_scope(message_id, account_id):
+            raise KeyError("source message unavailable")
+        record = self.db.execute(
+            "SELECT file_id,state FROM message_files WHERE account_id=? AND message_id=?",
+            (account_id, message_id),
+        ).fetchone()
+        if record is None:
+            record = self.begin_file_ingest(
+                account_id=account_id,
+                conversation_id=self._conversation_for_message(message_id, account_id),
+                message_id=message_id,
+                original_references=(),
+                filename=filename,
+                fileext=fileext,
+                expected_bytes=expected_bytes,
+                expected_md5=expected_md5,
+            )
+        if record["state"] == "pending":
+            with self._transaction():
+                self.db.execute(
+                    "UPDATE message_files SET state='failed',error_code=?,updated_at=? "
+                    "WHERE file_id=? AND account_id=? AND state='pending'",
+                    (error_code, _now(), record["file_id"], account_id),
+                )
+        return self.file_metadata_for_message(
+            account_id=account_id,
+            message_id=message_id,
+        ) or {"state": "failed", "error_code": error_code}
+
+    def archive_agent_file(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        artifact_path: Path,
+        filename: str,
+        mime_type: str,
+        operation_id: str,
+        delivery_state: str,
+    ) -> dict[str, str]:
+        if self._messages is None:
+            raise RuntimeError("message repository is not configured on MediaRepo")
+        path = artifact_path.resolve()
+        if not path.is_relative_to(self.file_root) or not path.is_file():
+            raise ValueError("outbound file must be archived under the file root")
+        size = path.stat().st_size
+        if not 0 < size <= 200_000_000:
+            raise ValueError("outbound file size out of range")
+        if not operation_id or len(operation_id) > 256:
+            raise ValueError("invalid operation ID")
+        if delivery_state not in ("queued", "accepted_by_server", "unknown", "not_sent"):
+            raise ValueError("invalid file archive state")
+        sha256_hash = hashlib.sha256()
+        md5_hash = hashlib.md5(usedforsecurity=False)
+        with path.open("rb") as f:
+            while chunk := f.read(1024 * 1024):
+                sha256_hash.update(chunk)
+                md5_hash.update(chunk)
+        digest = sha256_hash.hexdigest()
+        md5_hex = md5_hash.hexdigest()
+        clean_name = _bounded_text(filename, 512)
+        ext = Path(clean_name).suffix.lstrip(".").casefold()[:32]
+        raw = {
+            "direction": "outbound",
+            "fromid": account_id,
+            "toid": conversation_id,
+            "room": conversation_id if is_group_conversation(conversation_id) else "",
+            "msg": f"[Agent 发送文件] {clean_name}",
+            "msgtype": 49,
+            "app_type": "6",
+            "local_operation_id": operation_id,
+            "delivery_state": delivery_state,
+        }
+        archived = self._messages.archive_message(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            sender_id=account_id,
+            raw_envelope=raw,
+            source_record=raw,
+            body_text=json.dumps(
+                {
+                    "kind": "file_message",
+                    "app_type": "6",
+                    "text": clean_name,
+                    "filename": clean_name,
+                    "fileext": ext,
+                    "size_bytes": size,
+                    "md5": md5_hex,
+                },
+                ensure_ascii=False,
+            ),
+            direction="outbound",
+            delivery_state=delivery_state,
+        )
+        file_id = (
+            "fil_"
+            + hashlib.sha256(
+                f"{account_id}\0{conversation_id}\0{archived.message_id}".encode()
+            ).hexdigest()[:24]
+        )
+        now = _now()
+        with self._transaction():
+            self.db.execute(
+                "INSERT OR IGNORE INTO message_files "
+                "(file_id,account_id,conversation_id,message_id,original_references_json,"
+                "filename,fileext,expected_bytes,expected_md5,state,artifact_path,mime_type,"
+                "byte_count,sha256,created_at,updated_at) "
+                "VALUES (?,?,?,?,'[]',?,?,?,?,'ready',?,?,?,?,?,?)",
+                (
+                    file_id,
+                    account_id,
+                    conversation_id,
+                    archived.message_id,
+                    clean_name,
+                    ext,
+                    size,
+                    md5_hex,
+                    str(path),
+                    mime_type[:120],
+                    size,
+                    digest,
+                    now,
+                    now,
+                ),
+            )
+        return {"message_id": archived.message_id, "file_id": file_id}
+
+    def file_metadata_for_message(
+        self, *, account_id: str, message_id: str
+    ) -> dict[str, object] | None:
+        row = self.db.execute(
+            f"SELECT {self._FILE_PUBLIC_COLUMNS} FROM message_files WHERE account_id=? AND message_id=?",
+            (account_id, message_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def file_metadata_for_messages(
+        self, *, account_id: str, message_ids: Sequence[str]
+    ) -> dict[str, dict[str, object]]:
+        if not message_ids:
+            return {}
+        placeholders = ",".join("?" for _ in message_ids)
+        with self._lock:
+            rows = self.db.execute(
+                f"SELECT {self._FILE_PUBLIC_COLUMNS} "
+                f"FROM message_files WHERE account_id=? AND message_id IN ({placeholders})",
+                (account_id, *message_ids),
+            ).fetchall()
+        return {str(row["message_id"]): dict(row) for row in rows}
+
+    def get_file_for_message(
+        self, *, account_id: str, conversation_id: str, message_id: str
+    ) -> dict[str, object] | None:
+        cols = ",".join(f"f.{col}" for col in self._FILE_PUBLIC_COLUMNS.split(","))
+        row = self.db.execute(
+            f"SELECT {cols},f.artifact_path,s.expires_at,s.deleted_at FROM message_files f "
+            "JOIN source_messages s ON s.message_id=f.message_id "
+            "WHERE f.account_id=? AND f.conversation_id=? AND f.message_id=? "
+            "AND f.state='ready'",
+            (account_id, conversation_id, message_id),
+        ).fetchone()
+        if row is None or row["deleted_at"] is not None or row["expires_at"] <= _now():
+            return None
+        return dict(row)
+
+    def get_file_by_id(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str | None,
+        file_id: str,
+        include_unready: bool = False,
+    ) -> dict[str, object] | None:
+        cols = ",".join(f"f.{col}" for col in self._FILE_PUBLIC_COLUMNS.split(","))
+        query = (
+            f"SELECT {cols},f.artifact_path,s.expires_at,s.deleted_at FROM message_files f "
+            "JOIN source_messages s ON s.message_id=f.message_id "
+            "WHERE f.account_id=? AND f.file_id=?"
+        )
+        params: list[object] = [account_id, file_id]
+        if conversation_id is not None:
+            query += " AND f.conversation_id=?"
+            params.append(conversation_id)
+        if not include_unready:
+            query += " AND f.state='ready'"
+        row = self.db.execute(query, params).fetchone()
+        if row is None or row["deleted_at"] is not None or row["expires_at"] <= _now():
+            return None
+        return dict(row)
+
+    def get_latest_ready_file(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        before_message_id: str | None = None,
+        include_unready: bool = False,
+    ) -> dict[str, object] | None:
+        cutoff = None
+        if before_message_id:
+            row = self.db.execute(
+                "SELECT captured_at FROM source_messages WHERE message_id=? AND account_id=? "
+                "AND conversation_id=? AND deleted_at IS NULL",
+                (before_message_id, account_id, conversation_id),
+            ).fetchone()
+            if row is None:
+                return None
+            cutoff = row["captured_at"]
+        cols = ",".join(f"f.{col}" for col in self._FILE_PUBLIC_COLUMNS.split(","))
+        query = (
+            f"SELECT {cols},f.artifact_path,s.expires_at,s.deleted_at,s.captured_at "
+            "FROM message_files f "
+            "JOIN source_messages s ON s.message_id=f.message_id "
+            "WHERE f.account_id=? AND f.conversation_id=? "
+            "AND s.deleted_at IS NULL AND s.expires_at>?"
+        )
+        params: list[object] = [account_id, conversation_id, _now()]
+        if not include_unready:
+            query += " AND f.state='ready'"
+        else:
+            query += " AND f.state!='deleted'"
+        if cutoff is not None:
+            query += " AND s.captured_at<=?"
+            params.append(cutoff)
+        query += " ORDER BY s.captured_at DESC,f.created_at DESC LIMIT 1"
+        row = self.db.execute(query, params).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_files(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, object]]:
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError("file list bounds out of range")
+        cols = ",".join(f"f.{col}" for col in self._FILE_PUBLIC_COLUMNS.split(","))
+        query = (
+            f"SELECT {cols},s.captured_at FROM message_files f "
+            "JOIN source_messages s ON s.message_id=f.message_id "
+            "WHERE f.account_id=? AND f.state!='deleted' AND s.deleted_at IS NULL AND s.expires_at>?"
+        )
+        params: list[object] = [account_id, _now()]
+        if conversation_id is not None:
+            query += " AND f.conversation_id=?"
+            params.append(conversation_id)
+        query += " ORDER BY s.captured_at DESC,f.created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        rows = self.db.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_file_summary(
+        self, *, account_id: str, file_id: str, summary: str, model_id: str
+    ) -> None:
+        summary = _bounded_text(summary, 12000)
+        model_id = _bounded_text(model_id, 100)
+        now = _now()
+        with self._transaction():
+            cur = self.db.execute(
+                "UPDATE message_files SET summary=?,summary_model_id=?,summarized_at=?,updated_at=? "
+                "WHERE file_id=? AND account_id=? AND state='ready'",
+                (summary, model_id, now, now, file_id, account_id),
+            )
+            if not cur.rowcount:
+                raise KeyError("ready file unavailable")

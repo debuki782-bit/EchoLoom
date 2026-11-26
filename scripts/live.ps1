@@ -1,4 +1,4 @@
-﻿﻿param([ValidateSet('status','start','stop','pause','resume','restart-worker')][string]$Action='status')
+﻿param([ValidateSet('status','start','stop','pause','resume','restart-worker')][string]$Action='status')
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $python=$null
@@ -17,8 +17,10 @@ $ingressHost=if($env:WECHAT_AGENT_HOST){$env:WECHAT_AGENT_HOST}elseif($srvCfg.in
 $ingressPort=if($env:WECHAT_AGENT_PORT){[int]$env:WECHAT_AGENT_PORT}elseif($srvCfg.ingress_port){[int]$srvCfg.ingress_port}else{8080}
 $agentStatusUrl="http://${ingressHost}:${ingressPort}/status"
 $hookCfg=if($runtimeMeta -and $runtimeMeta.wechat_hook){$runtimeMeta.wechat_hook}else{[pscustomobject]@{hook_url='http://127.0.0.1:30001';native_download_url='http://127.0.0.1:30002'}}
-$hookPort=([Uri](if($hookCfg.hook_url){[string]$hookCfg.hook_url}else{'http://127.0.0.1:30001'})).Port
-$nativeDownloadStatusUrl=((if($hookCfg.native_download_url){[string]$hookCfg.native_download_url}else{'http://127.0.0.1:30002'}).TrimEnd('/') + '/status')
+$hookUrl=if($hookCfg.hook_url){[string]$hookCfg.hook_url}else{'http://127.0.0.1:30001'}
+$hookPort=([Uri]$hookUrl).Port
+$nativeDownloadBase=if($hookCfg.native_download_url){[string]$hookCfg.native_download_url}else{'http://127.0.0.1:30002'}
+$nativeDownloadStatusUrl=($nativeDownloadBase.TrimEnd('/') + '/status')
 $configuredFactory=if($env:ECHOLOOM_GATEWAY_FACTORY){$env:ECHOLOOM_GATEWAY_FACTORY}else{$env:WECHAT_GATEWAY_FACTORY}
 $usesWechatSource=if($configuredFactory){
     $configuredFactory -in @('echoloom.adapters.hook:HookGateway','echoloom.connectors.wechat_hook:WeChatHookConnector')

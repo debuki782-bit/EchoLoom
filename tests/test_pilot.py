@@ -1585,3 +1585,79 @@ def test_layer3_scheduler_modules_have_no_hardcoded_hook_endpoints():
             "/QueryDB/status",
         ):
             assert endpoint not in source, (name, endpoint)
+
+
+def test_worker_indeterminate_enforces_global_cooldown_and_resets_after_recovery(tmp_path: Path):
+    from echoloom.runtime_contract import ModelCallIndeterminate
+
+    async def scenario():
+        call_times: list[float] = []
+        refresh_calls = 0
+        fail_next = True
+        both_done = asyncio.Event()
+        replies_done = 0
+
+        async def on_indeterminate():
+            nonlocal refresh_calls
+            refresh_calls += 1
+
+        async def reply(context):
+            nonlocal fail_next, replies_done
+            call_times.append(asyncio.get_running_loop().time())
+            if fail_next:
+                fail_next = False
+                raise ModelCallIndeterminate("simulated 60s timeout")
+            replies_done += 1
+            if replies_done >= 2:
+                both_done.set()
+            return f"ok:{len(context.turns)}"
+
+        memory = MemoryStore(tmp_path / "memory.sqlite3")
+        pilot = Pilot(
+            tmp_path / "pilot.sqlite3",
+            "bot",
+            "room@chatroom",
+            reply,
+            lambda _draft: HookSendResult("queued"),
+            limit=None,
+            mode="selfhosted_group",
+            memory_store=memory,
+            context_assembler=MessageContextAssembler(memory, max_user_bytes=6000),
+            registered_group_ids={"room2@chatroom"},
+            on_model_indeterminate=on_indeterminate,
+            indeterminate_cooldown_base_seconds=0.3,
+            indeterminate_cooldown_max_seconds=0.6,
+        )
+        pilot.scheduler.debounce_seconds = 0.01
+        pilot.scheduler.max_wait_seconds = 0.02
+
+        assert pilot.offer(observed("第一条触发超时", room="room@chatroom", tick=1)) == "queued_test"
+        await asyncio.sleep(0.03)
+        worker = asyncio.create_task(pilot.worker())
+        try:
+            # Wait until first batch fails once and enters indeterminate cooldown, then queue second chat.
+            for _ in range(50):
+                if refresh_calls == 1:
+                    break
+                await asyncio.sleep(0.01)
+            assert refresh_calls == 1
+            assert pilot.offer(
+                observed("第二条不应立刻连撞", room="room2@chatroom", sender="wxid_member2", tick=2)
+            ) == "queued_test"
+            await asyncio.wait_for(both_done.wait(), timeout=8.0)
+            for _ in range(50):
+                if pilot.scheduler.state_counts() == {"model_seen": 2}:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(call_times) == 3
+            # Second call (even for room2) was held back by at least the 0.3s global cooldown.
+            assert call_times[1] - call_times[0] >= 0.25
+            assert pilot.dispatcher._indeterminate_failures == 0
+            assert pilot.scheduler.state_counts() == {"model_seen": 2}
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            memory.close()
+            pilot.db.close()
+
+    asyncio.run(scenario())

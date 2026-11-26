@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from .event_book import EventBook
     from .idle_tools import IdleActivityToolset
     from .ingress import Ingress
-    from .media import WeChatImageIngestor, WeChatVoiceIngestor
+    from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
     from .memory_store import MemoryStore
     from .message_ingestor import MessageIngestor
     from .mock import SystemClock
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from .storage import Repository
     from .temporal_context import DailyEnvironmentProvider
     from .time_scheduler import TimeScheduler
-    from .toolsets import MediaToolset, MemoryToolset, ReplyToolset
+    from .toolsets import MediaToolset, MemoryToolset, ReplyToolset, WorkspaceToolset
     from .web_tools import WebSearchUsage
 
 
@@ -65,6 +65,7 @@ class ProviderBundle:
     make_adk_model: Callable[..., Any]
     provider_check: Callable[[], Awaitable[bool]]
     usage_ledger: Callable[[], Any]
+    refresh_gemini_clients: Callable[[], Awaitable[None]] | None = None
 
     @property
     def model_client(self) -> Any:
@@ -87,6 +88,7 @@ class ServiceBundle:
     model_overrides: ModelOverrideStore
     image_ingestor: WeChatImageIngestor
     voice_ingestor: WeChatVoiceIngestor
+    file_ingestor: WeChatFileIngestor
     daily_environment: DailyEnvironmentProvider
     message_ingestor: MessageIngestor
     context_builder: ContextBuilder
@@ -95,6 +97,7 @@ class ServiceBundle:
     cross_sessions: CrossSessionService
     cross_tools: CrossSessionToolset
     project_tools: ProjectTools
+    workspace_tools: WorkspaceToolset
     idle_tools: IdleActivityToolset
     profile_tools: Callable[[AgentProfile, Any], list[Any]]
 

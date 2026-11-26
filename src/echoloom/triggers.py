@@ -21,7 +21,7 @@ from .dispatcher import (
 )
 from .dispatcher_support import batch_execution_scope
 from .ingress import sha
-from .runtime_contract import ModelProviderUnavailable
+from .runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
 from .time_scheduler import TimeScheduler
 from .tool_timing import turn_deadline_monotonic, turn_started_monotonic
 from .turn_scope import tool_turn_scope
@@ -764,12 +764,7 @@ class FollowupTrigger:
                 if batch is not None
                 else receipt
             )
-            delivery = self.dispatcher.current_delivery_state(batch_receipt)
-            has_side_effect = (
-                int(delivery.get("send_attempt_count", 0) or 0) > 0
-                or delivery.get("last_send_status")
-                in ("queued", "accepted_by_server", "unknown")
-            )
+            has_side_effect = self.dispatcher._batch_scope_has_side_effect(batch_receipt)
             if not has_side_effect:
                 delay = self.dispatcher.trip_provider_circuit("scheduled_followup_unavailable")
                 state = "provider_unavailable"
@@ -787,6 +782,34 @@ class FollowupTrigger:
             else:
                 state = "provider_unavailable_after_send"
             logger.warning("event=scheduled_followup_failed error_type=ModelProviderUnavailable")
+        except ModelCallIndeterminate:
+            cooldown, has_side_effect = await self.dispatcher.handle_model_indeterminate(
+                batch,
+                reason="scheduled_followup_indeterminate",
+                scope_override=receipt if batch is None else None,
+            )
+            state = (
+                "model_indeterminate_after_send"
+                if has_side_effect
+                else "model_call_indeterminate"
+            )
+            if batch is not None:
+                self.dispatcher.scheduler.release_for_retry(
+                    batch,
+                    state,
+                    min_delay_seconds=cooldown,
+                )
+                deferred_batch = True
+            elif job_id and self.time_scheduler is not None:
+                deferred_job = self.time_scheduler.defer(
+                    job_id,
+                    datetime.now(UTC) + timedelta(seconds=cooldown),
+                    state,
+                )
+            logger.warning(
+                "event=scheduled_followup_failed error_type=ModelCallIndeterminate cooldown_seconds=%.2f",
+                cooldown,
+            )
         except Exception as exc:  # noqa: BLE001
             state = "scheduled_followup_unknown"
             logger.warning("event=scheduled_followup_failed error_type=%s", type(exc).__name__)

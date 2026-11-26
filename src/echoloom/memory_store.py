@@ -72,6 +72,7 @@ class MemoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._media_root = (path.parent / "received-images").resolve()
         self._audio_root = (path.parent / "received-audio").resolve()
+        self._file_root = (path.parent / "received-files").resolve()
         self.path = Path(path).resolve()
         self._lock = threading.RLock()
         self.db = sqlite3.connect(path, timeout=1, check_same_thread=False)
@@ -94,6 +95,7 @@ class MemoryStore:
             self.transaction,
             media_root=self._media_root,
             audio_root=self._audio_root,
+            file_root=self._file_root,
             messages=self.messages,
             knowledge=self.knowledge,
         )
@@ -117,6 +119,16 @@ class MemoryStore:
         self._audio_root = value
         if hasattr(self, "media"):
             self.media.audio_root = value
+
+    @property
+    def file_root(self) -> Path:
+        return self._file_root
+
+    @file_root.setter
+    def file_root(self, value: Path) -> None:
+        self._file_root = value
+        if hasattr(self, "media"):
+            self.media.file_root = value
 
     @contextmanager
     def transaction(self):
@@ -899,6 +911,162 @@ class MemoryStore:
         now: str,
     ) -> None:
         self.knowledge._audit(scope, actor_kind, actor, action, object_type, object_id, version, now)
+
+    def begin_file_ingest(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        message_id: str,
+        original_references: Sequence[dict[str, str]],
+        filename: str,
+        fileext: str = "",
+        expected_bytes: int | None = None,
+        expected_md5: str | None = None,
+    ) -> dict[str, object]:
+        return self.media.begin_file_ingest(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            original_references=original_references,
+            filename=filename,
+            fileext=fileext,
+            expected_bytes=expected_bytes,
+            expected_md5=expected_md5,
+        )
+
+    def complete_file_ingest(
+        self,
+        *,
+        file_id: str,
+        account_id: str,
+        artifact_path: str,
+        mime_type: str,
+        byte_count: int,
+        sha256: str,
+    ) -> None:
+        self.media.complete_file_ingest(
+            file_id=file_id,
+            account_id=account_id,
+            artifact_path=artifact_path,
+            mime_type=mime_type,
+            byte_count=byte_count,
+            sha256=sha256,
+        )
+
+    def fail_file_ingest_for_message(
+        self,
+        *,
+        account_id: str,
+        message_id: str,
+        error_code: str,
+        filename: str = "unnamed",
+        fileext: str = "",
+        expected_bytes: int | None = None,
+        expected_md5: str | None = None,
+    ) -> dict[str, object]:
+        return self.media.fail_file_ingest_for_message(
+            account_id=account_id,
+            message_id=message_id,
+            error_code=error_code,
+            filename=filename,
+            fileext=fileext,
+            expected_bytes=expected_bytes,
+            expected_md5=expected_md5,
+        )
+
+    def archive_agent_file(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        artifact_path: Path,
+        filename: str,
+        mime_type: str,
+        operation_id: str,
+        delivery_state: str,
+    ) -> dict[str, str]:
+        return self.media.archive_agent_file(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            artifact_path=artifact_path,
+            filename=filename,
+            mime_type=mime_type,
+            operation_id=operation_id,
+            delivery_state=delivery_state,
+        )
+
+    def file_metadata_for_message(
+        self, *, account_id: str, message_id: str
+    ) -> dict[str, object] | None:
+        return self.media.file_metadata_for_message(
+            account_id=account_id,
+            message_id=message_id,
+        )
+
+    def get_file_for_message(
+        self, *, account_id: str, conversation_id: str, message_id: str
+    ) -> dict[str, object] | None:
+        return self.media.get_file_for_message(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            message_id=message_id,
+        )
+
+    def get_file_by_id(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str | None,
+        file_id: str,
+        include_unready: bool = False,
+    ) -> dict[str, object] | None:
+        return self.media.get_file_by_id(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            file_id=file_id,
+            include_unready=include_unready,
+        )
+
+    def get_latest_ready_file(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        before_message_id: str | None = None,
+        include_unready: bool = False,
+    ) -> dict[str, object] | None:
+        return self.media.get_latest_ready_file(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            before_message_id=before_message_id,
+            include_unready=include_unready,
+        )
+
+    def list_files(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, object]]:
+        return self.media.list_files(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def save_file_summary(
+        self, *, account_id: str, file_id: str, summary: str, model_id: str
+    ) -> None:
+        self.media.save_file_summary(
+            account_id=account_id,
+            file_id=file_id,
+            summary=summary,
+            model_id=model_id,
+        )
 
     def close(self) -> None:
         self.db.close()

@@ -1054,3 +1054,231 @@ def test_image_subbudget_fallback_preserves_web_reservation_allowance(
             repo.close()
 
     asyncio.run(scenario())
+
+
+def test_adk_streaming_collects_partials_and_logs_indeterminate_timeout(
+    tmp_path: Path, caplog,
+) -> None:
+    async def scenario() -> None:
+        req = httpx.Request("POST", "https://example.invalid")
+        refreshed: list[str] = []
+
+        class StreamingSplitFake(DeterministicLlm):
+            _mode: str = PrivateAttr(default="ok")
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = "gemini-4-hydrogen"
+
+            async def generate_content_async(self, llm_request, stream=False):
+                self.requests.append((llm_request, stream))
+                assert stream is True
+                if self._mode == "ok":
+                    yield LlmResponse(
+                        content=types.Content(role="model", parts=[types.Part.from_text(text="先")]),
+                        partial=True,
+                    )
+                    yield LlmResponse(
+                        content=types.Content(role="model", parts=[types.Part.from_text(text="你好")]),
+                        partial=False,
+                    )
+                    yield LlmResponse(
+                        content=types.Content(
+                            role="model",
+                            parts=[types.Part.from_function_call(name="ping_tool", args={})],
+                        ),
+                        usage_metadata=types.GenerateContentResponseUsageMetadata(
+                            prompt_token_count=200,
+                            candidates_token_count=20,
+                            total_token_count=220,
+                        ),
+                        partial=False,
+                    )
+                else:
+                    yield LlmResponse(
+                        content=types.Content(role="model", parts=[types.Part.from_text(text="半截")]),
+                        partial=True,
+                    )
+                    raise httpx.ReadTimeout("stream stalled", request=req)
+
+        repo = Repository(tmp_path / "streaming.sqlite3")
+        usage = UsageLedger(repo, Clock())
+        fake = StreamingSplitFake()
+        model = BudgetedAdkModel(
+            fake,
+            usage,
+            Clock(),
+            model_id=fake.model,
+            budget_microusd=1_000_000,
+            use_streaming=True,
+            on_indeterminate=lambda: refreshed.append("refreshed"),
+        )
+        request = LlmRequest(
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text="测试流式")])],
+        )
+        try:
+            with model_usage_scope("bot", "room"):
+                items = [item async for item in model.generate_content_async(request)]
+            assert len(items) == 1
+            assert len(items[0].content.parts) == 2
+            assert items[0].content.parts[0].text == "你好"
+            assert items[0].content.parts[1].function_call.name == "ping_tool"
+            assert fake.requests[0][1] is True
+            assert repo.conn.execute("SELECT state FROM usage_reservations").fetchone()[0] == "settled"
+
+            fake._mode = "timeout_mid_stream"
+            caplog.set_level("WARNING", logger="echoloom.frameworks.adk_budget")
+            with model_usage_scope("bot", "room"), pytest.raises(ModelCallIndeterminate):
+                async for _ in model.generate_content_async(request):
+                    pass
+            assert refreshed == ["refreshed"]
+            states = [
+                r[0]
+                for r in repo.conn.execute("SELECT state FROM usage_reservations ORDER BY rowid").fetchall()
+            ]
+            assert states == ["settled", "reserved"]
+            assert any(
+                "event=adk_call_indeterminate" in rec.message
+                and "error_type=ReadTimeout" in rec.message
+                and "saw_partial=True" in rec.message
+                for rec in caplog.records
+            )
+        finally:
+            repo.close()
+
+    asyncio.run(scenario())
+
+
+def test_real_adk_framework_rewinds_unprogressed_indeterminate_and_budget_exhausted(
+    tmp_path: Path,
+) -> None:
+    from echoloom.runtime_contract import BudgetExhausted
+
+    async def scenario() -> None:
+        req = httpx.Request("POST", "https://example.invalid")
+        outcomes: list[object] = [
+            httpx.ReadTimeout("timeout-1", request=req),
+            types.Part.from_text(text="超时后重跑正常回复"),
+        ]
+
+        class TimeoutThenOkLlm(DeterministicLlm):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = "gemini-3.5-flash-lite"
+
+            async def generate_content_async(self, llm_request, stream=False):
+                self.requests.append(llm_request.model_copy(deep=True))
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                yield LlmResponse(
+                    content=types.Content(role="model", parts=[outcome]),
+                    usage_metadata=types.GenerateContentResponseUsageMetadata(
+                        prompt_token_count=100,
+                        candidates_token_count=10,
+                        total_token_count=110,
+                    ),
+                )
+
+        repo = Repository(tmp_path / "rewind-indeterminate.sqlite3")
+        usage = UsageLedger(repo, Clock())
+        fake = TimeoutThenOkLlm()
+        model = BudgetedAdkModel(fake, usage, Clock(), model_id=fake.model, budget_microusd=500_000)
+        framework = AdkFramework()
+        sessions = framework.sessions(tmp_path / "rewind-indet-sessions.sqlite3")
+        await sessions.create_session(app_name="wechat_agent_mock", user_id="u1", session_id="s1")
+        runner = framework.runner(model=model, sessions=sessions, instruction="简洁")
+        msg = RuntimeContent(role="user", parts=[RuntimePart.from_text(text="只该出现一次的消息")])
+        try:
+            with model_usage_scope("bot", "room"):
+                with pytest.raises(ModelCallIndeterminate):
+                    async for _ in runner.run_async(
+                        user_id="u1",
+                        session_id="s1",
+                        new_message=msg,
+                        run_config=RunOptions(max_llm_calls=4),
+                    ):
+                        pass
+                replies: list[str] = []
+                async for event in runner.run_async(
+                    user_id="u1",
+                    session_id="s1",
+                    new_message=msg,
+                    run_config=RunOptions(max_llm_calls=4),
+                ):
+                    if event.is_final_response() and event.content:
+                        replies.append("".join(p.text or "" for p in event.content.parts or []))
+                assert replies == ["超时后重跑正常回复"]
+                seen_on_second = [
+                    p.text
+                    for c in fake.requests[1].contents
+                    for p in c.parts or []
+                    if getattr(p, "text", None) and "只该出现一次的消息" in p.text
+                ]
+                assert seen_on_second == ["只该出现一次的消息"]
+
+                # Exhaust budget before calling delegate: must also rewind cleanly.
+                zero_model = BudgetedAdkModel(fake, usage, Clock(), model_id=fake.model, budget_microusd=0)
+                zero_runner = framework.runner(model=zero_model, sessions=sessions, instruction="简洁")
+                try:
+                    with pytest.raises(BudgetExhausted):
+                        async for _ in zero_runner.run_async(
+                            user_id="u1",
+                            session_id="s1",
+                            new_message=RuntimeContent(
+                                role="user",
+                                parts=[RuntimePart.from_text(text="不该堆积的预算耗尽消息")],
+                            ),
+                            run_config=RunOptions(max_llm_calls=4),
+                        ):
+                            pass
+                    session = await sessions.get_session(
+                        app_name="wechat_agent_mock", user_id="u1", session_id="s1",
+                    )
+                    assert getattr(
+                        getattr(session.events[-1], "actions", None),
+                        "rewind_before_invocation_id",
+                        None,
+                    ) is not None
+                finally:
+                    await zero_runner.close()
+        finally:
+            await runner.close()
+            await sessions.close()
+            repo.close()
+
+    asyncio.run(scenario())
+
+
+def test_budgeted_model_serializes_pydantic_class_response_schema(tmp_path: Path) -> None:
+    from echoloom.episode_memory import InformationAgentResult
+    from echoloom.frameworks.adk_budget import _serialized_request_bytes
+
+    async def scenario() -> None:
+        repo = Repository(tmp_path / "schema-budget.sqlite3")
+        usage = UsageLedger(repo, Clock())
+        fake = PricedFake()
+        fake.model = "gemini-3.5-flash-lite"
+        model = BudgetedAdkModel(fake, usage, Clock(), model_id=fake.model, budget_microusd=100_000)
+        request = LlmRequest(
+            model=fake.model,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text="extract")])],
+            config=types.GenerateContentConfig(
+                response_schema=InformationAgentResult,
+                response_mime_type="application/json",
+            ),
+        )
+        assert _serialized_request_bytes(request) > len(
+            request.model_dump_json(exclude={"tools_dict": True, "config": {"response_schema": True}}).encode()
+        )
+        try:
+            with model_usage_scope("bot", "room"):
+                responses = [
+                    resp async for resp in model.generate_content_async(request, stream=False)
+                ]
+            assert len(responses) == 1
+            assert usage.committed_microusd("bot", "2026-10") == 55
+        finally:
+            repo.close()
+
+    asyncio.run(scenario())

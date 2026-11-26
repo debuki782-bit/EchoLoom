@@ -32,7 +32,8 @@ $ExpectedWeixinDllSha256 = 'F487E4F56930456A25FB0D7B058C77E2DCD364E268D49BDFFF4D
 
 $hookAssetDir = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $hookAssetDir '..\..')).Path
-$patchFile = Join-Path $hookAssetDir 'patches\0001-echoloom-hardening-and-atlist.patch'
+$patchDir = Join-Path $hookAssetDir 'patches'
+$patchFiles = @(Get-ChildItem -LiteralPath $patchDir -Filter '*.patch' -File | Sort-Object Name)
 $nativeCpp = Join-Path $hookAssetDir 'native_image_download.cpp'
 $fridaReq = Join-Path $hookAssetDir 'requirements-frida.txt'
 
@@ -137,12 +138,14 @@ if ($UpstreamDir) {
     }
 }
 
-# 2. Apply EchoLoom patch (loopback 127.0.0.1, default callback, group atlist, hardened launcher)
-Write-Host "Applying patch: $(Split-Path -Leaf $patchFile)"
+# 2. Apply EchoLoom patches (loopback 127.0.0.1, default callback, group atlist, SendFileMsg, hardened launcher)
 Push-Location $srcDir
 try {
-    & $gitCmd.Source apply --ignore-space-change --ignore-whitespace --whitespace=nowarn $patchFile
-    if ($LASTEXITCODE -ne 0) { throw "git apply failed with exit code $LASTEXITCODE" }
+    foreach ($pf in $patchFiles) {
+        Write-Host "Applying patch: $($pf.Name)"
+        & $gitCmd.Source apply --ignore-space-change --ignore-whitespace --whitespace=nowarn $pf.FullName
+        if ($LASTEXITCODE -ne 0) { throw "git apply failed on $($pf.Name) with exit code $LASTEXITCODE" }
+    }
 } finally {
     Pop-Location
 }

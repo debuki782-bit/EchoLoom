@@ -116,19 +116,57 @@ def build_providers(
 
     count_model_tokens._gemini_client_provider = get_model_client  # type: ignore[attr-defined]
 
+    def _collect_stale_gemini_clients() -> list[Any]:
+        stale_clients: list[Any] = []
+        for timeout_key in list(gemini_clients):
+            stale_clients.append(gemini_clients[timeout_key])
+            gemini_clients[timeout_key] = new_gemini_client(timeout_key)
+        return stale_clients
+
+    def _schedule_close_clients(stale_clients: list[Any]) -> None:
+        if not stale_clients:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _close_all() -> None:
+            for old_client in stale_clients:
+                with suppress(Exception):
+                    await old_client.aio.aclose()
+
+        loop.create_task(_close_all())
+
+    def invalidate_gemini_clients() -> None:
+        _schedule_close_clients(_collect_stale_gemini_clients())
+
+    async def refresh_gemini_clients() -> None:
+        stale_clients = _collect_stale_gemini_clients()
+        for old_client in stale_clients:
+            with suppress(Exception):
+                await old_client.aio.aclose()
+
     def make_adk_model(
         profile: AgentProfile,
         *,
-        timeout_ms: int = 60_000,
+        timeout_ms: int | None = None,
         web: bool = False,
     ):
-        if catalog.provider_for(profile.model_id) == "openai":
+        is_gemini = catalog.provider_for(profile.model_id) == "gemini"
+        resolved_timeout_ms = (
+            (90_000 if (is_gemini and not web) else 60_000)
+            if timeout_ms is None
+            else timeout_ms
+        )
+        delegate: Any
+        if not is_gemini:
             if openai_client is None:
                 raise RuntimeError(f"OpenAI client required for model {profile.model_id!r}")
             delegate = OpenAIAdkModel(
                 profile.model_id,
                 openai_client,
-                timeout_seconds=timeout_ms / 1000,
+                timeout_seconds=resolved_timeout_ms / 1000,
             )
             token_counter = None
         elif web:
@@ -137,7 +175,7 @@ def build_providers(
         else:
             delegate = refreshable_gemini_cls(
                 model=profile.model_id,
-                client_provider=lambda t=timeout_ms: get_gemini_client(t),
+                client_provider=lambda t=resolved_timeout_ms: get_gemini_client(t),
             )
             token_counter = count_model_tokens
         return BudgetedAdkModel(
@@ -149,7 +187,9 @@ def build_providers(
             max_input_tokens=profile.input_token_limit,
             max_output_tokens=4096 if web else profile.output_token_limit,
             token_counter=token_counter,
-            http_timeout_ms=timeout_ms,
+            http_timeout_ms=resolved_timeout_ms,
+            use_streaming=(is_gemini and not web),
+            on_indeterminate=invalidate_gemini_clients if is_gemini else None,
             budget_scope_id=profile.profile_id,
             scope_budget_microusd=profile.daily_budget_microusd,
             text_budget_microusd=profile.text_budget_microusd,
@@ -200,11 +240,8 @@ def build_providers(
                 "event=provider_probe_check_failed error_type=%s",
                 type(exc).__name__,
             )
-            stale_clients: list[Any] = [model_client]
+            stale_clients: list[Any] = [model_client, *_collect_stale_gemini_clients()]
             model_client = new_model_client()
-            for timeout_key in list(gemini_clients):
-                stale_clients.append(gemini_clients[timeout_key])
-                gemini_clients[timeout_key] = new_gemini_client(timeout_key)
             for old_client in stale_clients:
                 with suppress(Exception):
                     await old_client.aio.aclose()
@@ -219,4 +256,5 @@ def build_providers(
         make_adk_model=make_adk_model,
         provider_check=provider_check,
         usage_ledger=usage_ledger,
+        refresh_gemini_clients=refresh_gemini_clients,
     )

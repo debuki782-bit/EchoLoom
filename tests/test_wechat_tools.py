@@ -1113,8 +1113,10 @@ def test_toolsets_split_tool_names_property_forwarding_and_dead_method_removal(t
             "list_wechat_images",
             "manage_wechat_image_library",
             "read_wechat_image",
+            "read_wechat_file",
             "transcribe_latest_wechat_voice",
             "send_wechat_image",
+            "send_wechat_file",
             "generate_and_send_wechat_image",
         }
         assert memory_set == {
@@ -1126,7 +1128,7 @@ def test_toolsets_split_tool_names_property_forwarding_and_dead_method_removal(t
         assert not (reply_set & memory_set)
         assert not (media_set & memory_set)
         assert set(WeChatTools.TOOL_NAMES) == reply_set | media_set | memory_set
-        assert len(WeChatTools.TOOL_NAMES) == 11
+        assert len(WeChatTools.TOOL_NAMES) == 13
 
         # Uninitialized schema inspection (used by OpenAI schema tests) stays functional.
         uninit_names = tuple(t.name for t in WeChatTools.__new__(WeChatTools).agent_tools())
@@ -1188,8 +1190,12 @@ def test_toolset_modules_have_no_hardcoded_hook_endpoints():
         root / "toolsets" / "reply.py",
         root / "toolsets" / "media.py",
         root / "toolsets" / "memory.py",
+        root / "toolsets" / "workspace.py",
     )
-    endpoints = ("/SendTextMsg", "/SendImgMsg", "/ForwardXMLMsg", "/Decode_Pic", "/QueryDB/status")
+    endpoints = (
+        "/SendTextMsg", "/SendImgMsg", "/SendFileMsg",
+        "/ForwardXMLMsg", "/Decode_Pic", "/Download_File", "/Upload_File", "/QueryDB/status",
+    )
     for path in files:
         source = path.read_text("utf-8")
         for endpoint in endpoints:

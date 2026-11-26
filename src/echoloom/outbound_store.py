@@ -425,13 +425,13 @@ class OutboundReceiptStore:
             ):
                 return None
             if (
-                action in ("text", "quote", "image", "generate_and_send_image")
+                action in ("text", "quote", "image", "generate_and_send_image", "file")
                 and failure_count >= self.MAX_SEND_ATTEMPTS
             ):
                 return None
             retry_marker = (
                 failure_count
-                if action in ("text", "quote", "image", "generate_and_send_image")
+                if action in ("text", "quote", "image", "generate_and_send_image", "file")
                 else 0
             )
             receipt = hashlib.sha256(
@@ -447,6 +447,7 @@ class OutboundReceiptStore:
                     "quote",
                     "image",
                     "generate_and_send_image",
+                    "file",
                 ):
                     scopes = tuple(dict.fromkeys((scope, *receipt_ids)))
                     self.db.executemany(

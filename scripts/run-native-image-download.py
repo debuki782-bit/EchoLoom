@@ -37,8 +37,15 @@ class NativeAdapter:
         const adapter = Module.load(ADAPTER);
         const init = new NativeFunction(adapter.getExportByName('ImageDownloadInitialize'), 'int', []);
         const ready = new NativeFunction(adapter.getExportByName('ImageDownloadReady'), 'int', []);
+        const uploadReady = new NativeFunction(adapter.getExportByName('FileUploadReady'), 'int', []);
         const submit = new NativeFunction(adapter.getExportByName('ImageDownloadSubmitKnown'),
             'int', ['pointer', 'pointer', 'pointer', 'uint', 'uint64']);
+        const submitFileDl = new NativeFunction(adapter.getExportByName('FileDownloadSubmit'),
+            'int', ['pointer', 'pointer', 'pointer', 'pointer', 'uint', 'uint64']);
+        const submitFileUl = new NativeFunction(adapter.getExportByName('FileUploadSubmit'),
+            'int', ['pointer', 'pointer', 'uint']);
+        const popFileUl = new NativeFunction(adapter.getExportByName('FileUploadPopResult'),
+            'int', ['pointer', 'pointer', 'pointer', 'size_t', 'pointer', 'size_t', 'pointer']);
         const wx = Process.getModuleByName('Weixin.dll');
         const bound = new Map(), completed = new Map();
         function nativeString(p) {
@@ -61,12 +68,40 @@ class NativeAdapter:
         rpc.exports = {
             initialize() { return init(); },
             ready() { return ready(); },
+            uploadReady() { return uploadReady(); },
             submit(id, path, key, type, bytes) {
                 bound.set(key, id);
                 const result = submit(Memory.allocUtf8String(id), Memory.allocUtf8String(path),
                     Memory.allocUtf8String(key), type, bytes);
                 if (result !== 0) { bound.delete(key); completed.delete(key); }
                 return result;
+            },
+            submitFileDownload(id, aeskey, path, key, type, bytes) {
+                bound.set(key, id);
+                const result = submitFileDl(Memory.allocUtf8String(id), Memory.allocUtf8String(aeskey),
+                    Memory.allocUtf8String(path), Memory.allocUtf8String(key), type, bytes);
+                if (result !== 0) { bound.delete(key); completed.delete(key); }
+                return result;
+            },
+            submitFileUpload(path, key, fileType) {
+                return submitFileUl(Memory.allocUtf8String(path), Memory.allocUtf8String(key), fileType);
+            },
+            popFileUpload(key) {
+                const outCode = Memory.alloc(4);
+                const outBytes = Memory.alloc(8);
+                const fileIdCap = 4096;
+                const aesCap = 128;
+                const outFileId = Memory.alloc(fileIdCap);
+                const outAesKey = Memory.alloc(aesCap);
+                const rc = popFileUl(Memory.allocUtf8String(key), outCode, outFileId, fileIdCap, outAesKey, aesCap, outBytes);
+                if (rc !== 1) return {completed: false, rc: rc};
+                return {
+                    completed: true,
+                    code: outCode.readS32(),
+                    fileid: outFileId.readUtf8String(),
+                    aeskey: outAesKey.readUtf8String(),
+                    bytes: outBytes.readU64().toNumber(),
+                };
             },
             result(key, id) {
                 const result = completed.get(key);
@@ -88,8 +123,23 @@ class NativeAdapter:
                                "agent_image_" + spec["job_id"],
                                spec["image_type"], spec["expected_bytes"])
 
+    def submit_file_download(self, spec, destination):
+        return self.api.submit_file_download(
+            spec["fileid"], spec["aeskey"], str(destination),
+            "agent_file_" + spec["job_id"], spec["file_type"], spec["expected_bytes"],
+        )
+
+    def submit_file_upload(self, spec):
+        return self.api.submit_file_upload(
+            spec["file_path"], "agent_upload_" + spec["job_id"], spec["file_type"],
+        )
+
+    def pop_file_upload(self, spec):
+        return self.api.pop_file_upload("agent_upload_" + spec["job_id"])
+
     def result(self, spec):
-        return self.api.result("agent_image_" + spec["job_id"], spec["fileid"])
+        prefix = "agent_file_" if "file_type" in spec else "agent_image_"
+        return self.api.result(prefix + spec["job_id"], spec["fileid"])
 
     def close(self):
         if not self.detached.is_set():
@@ -97,13 +147,29 @@ class NativeAdapter:
             self.session.detach()
 
 
+HEX32 = re.compile(r"[0-9a-fA-F]{32}")
+
+
+def _sha256_identity(spec: dict) -> str:
+    identity = {k: v for k, v in spec.items() if k != "job_id"}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
 class DownloadService:
-    def __init__(self, root: Path, adapter, account_id: str, account_check):
-        self.root, self.adapter, self.account_id = root.resolve(), adapter, account_id
+    def __init__(self, image_root: Path, adapter, account_id: str, account_check, *, file_root: Path | None = None):
+        self.root = image_root.resolve()
+        self.file_root = (
+            file_root.resolve()
+            if file_root is not None
+            else (self.root.parent / "native-file-downloads").resolve()
+        )
+        self.adapter, self.account_id = adapter, account_id
         self.account_check = account_check
         self.root.mkdir(parents=True, exist_ok=True)
+        self.file_root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.jobs = {}
+        self.upload_ephemeral = {}
         self.pending = queue.Queue(maxsize=16)
         # Persist only operation receipts: no file IDs, AES keys or chat content.
         self.db = sqlite3.connect(self.root / "receipts.sqlite3", check_same_thread=False)
@@ -131,9 +197,37 @@ class DownloadService:
                 or type(spec["expected_bytes"]) is not int or not 0 <= spec["expected_bytes"] <= MAX_BYTES
                 or not isinstance(spec["job_id"], str) or not HEX64.fullmatch(spec["job_id"])):
             raise ValueError("invalid_download_request")
-        identity = {k: v for k, v in spec.items() if k != "job_id"}
-        if hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest() != spec["job_id"]:
+        if _sha256_identity(spec) != spec["job_id"]:
             raise ValueError("download_identity_mismatch")
+
+    def validate_file_download(self, spec):
+        if (not isinstance(spec, dict) or set(spec) != {
+                "account_id", "fileid", "aeskey", "file_type", "expected_md5", "expected_bytes", "job_id"}
+                or spec["account_id"] != self.account_id
+                or not isinstance(spec["fileid"], str) or not 1 <= len(spec["fileid"]) <= 4096
+                or "://" in spec["fileid"] or "\0" in spec["fileid"]
+                or not isinstance(spec["aeskey"], str) or not HEX32.fullmatch(spec["aeskey"])
+                or type(spec["file_type"]) is not int or spec["file_type"] not in (5, 7)
+                or not isinstance(spec["expected_md5"], str) or not MD5.fullmatch(spec["expected_md5"])
+                or type(spec["expected_bytes"]) is not int or not 0 < spec["expected_bytes"] <= MAX_BYTES
+                or not isinstance(spec["job_id"], str) or not HEX64.fullmatch(spec["job_id"])):
+            raise ValueError("invalid_file_download_request")
+        if _sha256_identity(spec) != spec["job_id"]:
+            raise ValueError("download_identity_mismatch")
+
+    def validate_file_upload(self, spec):
+        if (not isinstance(spec, dict) or set(spec) != {
+                "account_id", "file_path", "expected_md5", "expected_bytes", "file_type", "job_id"}
+                or spec["account_id"] != self.account_id
+                or not isinstance(spec["file_path"], str) or not 1 <= len(spec["file_path"]) <= 4096
+                or "\0" in spec["file_path"]
+                or type(spec["file_type"]) is not int or spec["file_type"] not in (5, 7)
+                or not isinstance(spec["expected_md5"], str) or not MD5.fullmatch(spec["expected_md5"])
+                or type(spec["expected_bytes"]) is not int or not 0 < spec["expected_bytes"] <= MAX_BYTES
+                or not isinstance(spec["job_id"], str) or not HEX64.fullmatch(spec["job_id"])):
+            raise ValueError("invalid_file_upload_request")
+        if _sha256_identity(spec) != spec["job_id"]:
+            raise ValueError("upload_identity_mismatch")
 
     def persist(self, job_id, state, reason="", **metadata):
         with self.lock:
@@ -142,23 +236,37 @@ class DownloadService:
                             (job_id, state, reason, json.dumps(metadata)))
             self.db.commit()
 
-    def get(self, job_id):
+    def get(self, job_id, *, include_ephemeral_upload: bool = False):
         with self.lock:
             if job_id in self.jobs:
-                return dict(self.jobs[job_id])
-            row = self.db.execute("SELECT state,reason,metadata_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-        if row:
-            state, reason, metadata = row
-            if state in ("queued", "submitted"):
-                state, reason = "unknown", "service_restarted_during_download"
-            return {"job_id": job_id, "state": state, "reason": reason, **json.loads(metadata)}
-        return None
+                result = dict(self.jobs[job_id])
+            else:
+                row = self.db.execute("SELECT state,reason,metadata_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+                if not row:
+                    return None
+                state, reason, metadata = row
+                if state in ("queued", "submitted"):
+                    state, reason = "unknown", "service_restarted_during_download"
+                result = {"job_id": job_id, "state": state, "reason": reason, **json.loads(metadata)}
+            if include_ephemeral_upload and result.get("state") == "ready":
+                secret = self.upload_ephemeral.get(job_id)
+                if secret and time.monotonic() - secret["created_at"] < 1800:
+                    result["fileid"] = secret["fileid"]
+                    result["aeskey"] = secret["aeskey"]
+                else:
+                    return {"job_id": job_id, "state": "expired", "reason": "ephemeral_upload_credentials_expired"}
+            return result
 
-    def submit(self, spec):
-        self.validate(spec)
+    def submit(self, spec, *, mode: str = "image"):
+        if mode == "file_download":
+            self.validate_file_download(spec)
+        elif mode == "file_upload":
+            self.validate_file_upload(spec)
+        else:
+            self.validate(spec)
         with self.lock:
             row = self.db.execute("SELECT state,reason,metadata_json FROM jobs WHERE job_id=?", (spec["job_id"],)).fetchone()
-            if row:
+            if row and mode != "file_upload":
                 state, reason, metadata = row
                 active = self.jobs.get(spec["job_id"])
                 retryable = state == "failed" and reason in ("native_result_-101", "native_result_-102")
@@ -175,8 +283,65 @@ class DownloadService:
                             (spec["job_id"], "queued", ""))
             self.db.commit()
             self.jobs[spec["job_id"]] = result
-            self.pending.put_nowait(dict(spec))
+            queued_item = dict(spec)
+            queued_item["_mode"] = mode
+            self.pending.put_nowait(queued_item)
             return dict(result)
+
+    def _work_upload(self, spec):
+        job_id = spec["job_id"]
+        src = Path(spec["file_path"])
+        if not src.is_file():
+            self.persist(job_id, "failed", "upload_source_not_found")
+            return
+        data = src.read_bytes()
+        if len(data) != spec["expected_bytes"] or not 0 < len(data) <= MAX_BYTES:
+            self.persist(job_id, "failed", "upload_size_mismatch")
+            return
+        if hashlib.md5(data).hexdigest() != spec["expected_md5"]:
+            self.persist(job_id, "failed", "upload_md5_mismatch")
+            return
+        result = self.adapter.submit_file_upload(spec)
+        deadline = time.monotonic() + 5
+        while result == -101 and time.monotonic() < deadline:
+            time.sleep(0.2)
+            result = self.adapter.submit_file_upload(spec)
+        if result != 0:
+            state = "unknown" if result == -(2**31) else "failed"
+            self.persist(job_id, state, "native_result_" + str(result))
+            return
+        self.persist(job_id, "submitted")
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            completion = self.adapter.pop_file_upload(spec)
+            if completion.get("completed"):
+                code = completion.get("code", -1)
+                if code != 0:
+                    self.persist(job_id, "failed", "native_upload_completion_" + str(code))
+                    return
+                fileid = str(completion.get("fileid", ""))
+                aeskey = str(completion.get("aeskey", "")).lower()
+                if not fileid or not HEX32.fullmatch(aeskey):
+                    self.persist(job_id, "failed", "native_upload_missing_credentials")
+                    return
+                with self.lock:
+                    if len(self.upload_ephemeral) >= 64:
+                        oldest = next(iter(self.upload_ephemeral))
+                        del self.upload_ephemeral[oldest]
+                    self.upload_ephemeral[job_id] = {
+                        "fileid": fileid, "aeskey": aeskey, "created_at": time.monotonic(),
+                    }
+                self.persist(
+                    job_id, "ready",
+                    verification="file_md5",
+                    sha256=hashlib.sha256(data).hexdigest(),
+                    md5=spec["expected_md5"],
+                    byte_count=len(data),
+                    native_completion=0,
+                )
+                return
+            time.sleep(0.2)
+        self.persist(job_id, "unknown", "upload_completion_timeout")
 
     def work(self):
         while True:
@@ -185,27 +350,33 @@ class DownloadService:
                 self.pending.task_done()
                 return
             job_id = spec["job_id"]
+            mode = spec.pop("_mode", "image")
             try:
                 if not self.account_check():
                     self.persist(job_id, "failed", "wechat_account_changed_or_unavailable")
                     continue
-                path = self.root / (job_id + ".bin")
+                if mode == "file_upload":
+                    self._work_upload(spec)
+                    continue
+                is_file = mode == "file_download"
+                target_dir = self.file_root if is_file else self.root
+                path = target_dir / (job_id + ".bin")
                 if path.exists():
                     self.persist(job_id, "unknown", "unexpected_existing_output")
                     continue
-                result = self.adapter.submit(spec, path)
+                result = self.adapter.submit_file_download(spec, path) if is_file else self.adapter.submit(spec, path)
                 # -102 has not submitted a native task. A just-arriving thumbnail
                 # can supply credentials shortly after the inbound callback.
                 deadline = time.monotonic() + 5
                 while result == -102 and time.monotonic() < deadline:
                     time.sleep(0.2)
-                    result = self.adapter.submit(spec, path)
+                    result = self.adapter.submit_file_download(spec, path) if is_file else self.adapter.submit(spec, path)
                 if result != 0:
                     state = "unknown" if result == -(2**31) else "failed"
                     self.persist(job_id, state, "native_result_" + str(result))
                     continue
                 self.persist(job_id, "submitted")
-                deadline = time.monotonic() + 30
+                deadline = time.monotonic() + (60 if is_file else 30)
                 previous = None
                 while time.monotonic() < deadline:
                     completion = self.adapter.result(spec)
@@ -224,13 +395,14 @@ class DownloadService:
                             native_bound = (completion.get("completed") is True
                                             and completion.get("code") == 0
                                             and completion.get("resource_bound") is True)
-                            if exact or native_bound:
+                            if (exact and (not is_file or len(data) == spec["expected_bytes"])) or (not is_file and native_bound):
                                 # CDN may return JPEG while WeChat cached the same
                                 # resource as WXGF. Identity then comes from the
                                 # native task's exact fileid/AES binding and success
                                 # callback; validate file bytes independently.
-                                with Image.open(path) as image:
-                                    image.verify()
+                                if not is_file:
+                                    with Image.open(path) as image:
+                                        image.verify()
                                 self.persist(job_id, "ready",
                                     verification="message_md5" if exact else "native_resource",
                                     resource_sha256=hashlib.sha256(spec["fileid"].encode()).hexdigest(),
@@ -271,8 +443,13 @@ def main():
     if not current_account(args.account):
         parser.error("the requested account is not currently logged in")
     adapter = NativeAdapter(args.pid, args.adapter_dll)
-    service = DownloadService(ROOT / "data/native-image-downloads", adapter, args.account,
-                              lambda: current_account(args.account))
+    service = DownloadService(
+        ROOT / "data/native-image-downloads",
+        adapter,
+        args.account,
+        lambda: current_account(args.account),
+        file_root=ROOT / "data/native-file-downloads",
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -290,28 +467,45 @@ def main():
             if self.path == "/status":
                 try:
                     ready = bool(adapter.api.ready())
+                    upload_ready = bool(adapter.api.upload_ready())
                 except Exception:
                     ready = False
+                    upload_ready = False
                 self.reply(200, {"service": "wechat-native-image-download", "pid": args.pid,
-                                 "callback_ready": ready, "fingerprint": DLL_SHA})
+                                 "callback_ready": ready, "upload_ready": upload_ready,
+                                 "fingerprint": DLL_SHA})
             elif self.path.startswith("/Download_Image/"):
                 job = self.path.removeprefix("/Download_Image/")
                 result = service.get(job) if HEX64.fullmatch(job) else None
+                self.reply(200 if result else 404, result or {"error": "job_not_found"})
+            elif self.path.startswith("/Download_File/"):
+                job = self.path.removeprefix("/Download_File/")
+                result = service.get(job) if HEX64.fullmatch(job) else None
+                self.reply(200 if result else 404, result or {"error": "job_not_found"})
+            elif self.path.startswith("/Upload_File/"):
+                job = self.path.removeprefix("/Upload_File/")
+                result = service.get(job, include_ephemeral_upload=True) if HEX64.fullmatch(job) else None
                 self.reply(200 if result else 404, result or {"error": "job_not_found"})
             else:
                 self.reply(404, {"error": "not_found"})
 
         def do_POST(self):
-            if self.path != "/Download_Image":
+            mode_map = {
+                "/Download_Image": "image",
+                "/Download_File": "file_download",
+                "/Upload_File": "file_upload",
+            }
+            mode = mode_map.get(self.path)
+            if mode is None:
                 self.reply(404, {"error": "not_found"})
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= 10000:
                     raise ValueError("invalid_request_length")
-                self.reply(200, service.submit(json.loads(self.rfile.read(length))))
+                self.reply(200, service.submit(json.loads(self.rfile.read(length)), mode=mode))
             except (ValueError, TypeError, KeyError):
-                self.reply(400, {"error": "invalid_download_request"})
+                self.reply(400, {"error": "invalid_request"})
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     def stop_after_wechat_exit():

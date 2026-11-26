@@ -20,7 +20,7 @@ from .conversation_scheduler import ConversationScheduler
 from .db_async import register_thread_safe_db
 from .dispatcher import Dispatcher, current_message_id
 from .ingress import Ingress, create_ingress_app, read_attempt_counts, sha
-from .media import WeChatImageIngestor, WeChatVoiceIngestor
+from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
 from .memory_store import MemoryStore
 from .message_ingestor import MessageIngestor
 from .models import ReplyDraft
@@ -128,6 +128,7 @@ class Pilot:
         memory_store: MemoryStore | None = None,
         image_ingestor: WeChatImageIngestor | None = None,
         voice_ingestor: WeChatVoiceIngestor | None = None,
+        file_ingestor: WeChatFileIngestor | None = None,
         daily_environment: DailyEnvironmentProvider | None = None,
         record_activity: Callable[[str, str], Awaitable[None]] | None = None,
         delivery_state: Callable[[str], dict[str, object]] | None = None,
@@ -154,6 +155,9 @@ class Pilot:
         provider_check: Callable[[], Awaitable[bool]] | None = None,
         provider_probe_base_seconds: float = 5.0,
         provider_probe_max_seconds: float = 30.0,
+        on_model_indeterminate: Callable[[], Awaitable[None] | None] | None = None,
+        indeterminate_cooldown_base_seconds: float = 30.0,
+        indeterminate_cooldown_max_seconds: float = 600.0,
         outbound: OutboundService | None = None,
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,7 +197,8 @@ class Pilot:
             self.db, self.scheduler, account, room, reply, send,
             outbound=outbound, limit=limit, resolve_contact=resolve_contact,
             memory_store=memory_store, image_ingestor=image_ingestor,
-            voice_ingestor=voice_ingestor, daily_environment=daily_environment,
+            voice_ingestor=voice_ingestor, file_ingestor=file_ingestor,
+            daily_environment=daily_environment,
             record_activity=record_activity, delivery_state=delivery_state,
             record_send_result=record_send_result,
             pending_delivery_notices=pending_delivery_notices,
@@ -208,6 +213,9 @@ class Pilot:
             archive_envelope=archive_envelope, provider_check=provider_check,
             provider_probe_base_seconds=provider_probe_base_seconds,
             provider_probe_max_seconds=provider_probe_max_seconds,
+            on_model_indeterminate=on_model_indeterminate,
+            indeterminate_cooldown_base_seconds=indeterminate_cooldown_base_seconds,
+            indeterminate_cooldown_max_seconds=indeterminate_cooldown_max_seconds,
             in_scope=self.ingress.in_scope,
             is_paused=lambda: self.ingress.paused,
             is_wechat_ready=lambda: self.triggers.login_watcher.wechat_ready,

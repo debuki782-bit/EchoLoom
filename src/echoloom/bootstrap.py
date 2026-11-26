@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from .episode_memory import EpisodeMemory
     from .event_book import EventBook
     from .idle_tools import IdleActivityToolset
-    from .media import WeChatImageIngestor, WeChatVoiceIngestor
+    from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
     from .memory_store import MemoryStore
     from .message_ingestor import MessageIngestor
     from .mock import SystemClock
@@ -73,7 +73,7 @@ if TYPE_CHECKING:
     from .storage import Repository
     from .temporal_context import DailyEnvironmentProvider
     from .time_scheduler import TimeScheduler
-    from .toolsets import MediaToolset, MemoryToolset, ReplyToolset
+    from .toolsets import MediaToolset, MemoryToolset, ReplyToolset, WorkspaceToolset
     from .web_tools import WebSearchUsage
     from .wechat_tools import WeChatTools
 
@@ -214,7 +214,7 @@ def build_services(
     from .episode_memory import EpisodeMemory
     from .event_book import EventBook
     from .idle_tools import IdleActivityToolset
-    from .media import WeChatImageIngestor, WeChatVoiceIngestor
+    from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
     from .memory_store import MemoryStore
     from .message_ingestor import MessageIngestor
     from .model_overrides import ModelOverrideStore
@@ -222,6 +222,7 @@ def build_services(
     from .project_tools import ProjectTools
     from .temporal_context import DailyEnvironmentProvider
     from .time_scheduler import TimeScheduler
+    from .toolsets import WorkspaceToolset
     from .web_tools import WebSearchUsage, WebToolset
 
     workspace = Path(root)
@@ -240,7 +241,7 @@ def build_services(
     event_book = EventBook(memory_store)
 
     episode_memory = None
-    rag_env = os.environ.get("WECHAT_AGENT_EPISODE_RAG")
+    rag_env = os.environ.get("ECHOLOOM_EPISODE_RAG") or os.environ.get("WECHAT_AGENT_EPISODE_RAG")
     episode_rag_enabled = (
         rag_env == "1" if rag_env is not None else runtime_cfg.server.episode_rag_enabled
     )
@@ -286,6 +287,7 @@ def build_services(
         openai_client=providers.openai_client,
         gateway=gateway,
         outbound_service=outbound,
+        command_owner_ids=profile_config.command_owner_ids,
     )
 
     image_ingestor = WeChatImageIngestor(workspace, gateway=gateway)
@@ -295,6 +297,8 @@ def build_services(
     )
     tools.image_ingestor = image_ingestor
     voice_ingestor = WeChatVoiceIngestor(workspace, gateway=gateway)
+    file_ingestor = WeChatFileIngestor(workspace, gateway=gateway)
+    tools.file_ingestor = file_ingestor
     daily_environment = DailyEnvironmentProvider()
     contact_resolver = gateway.resolve_contact
 
@@ -302,6 +306,7 @@ def build_services(
         memory_store,
         image_ingestor=image_ingestor,
         voice_ingestor=voice_ingestor,
+        file_ingestor=file_ingestor,
         archive_envelope=gateway.archive_envelope,
     )
     context_builder = ContextBuilder(
@@ -315,6 +320,7 @@ def build_services(
         resolve_contact=contact_resolver,
         image_ingestor=image_ingestor,
         voice_ingestor=voice_ingestor,
+        file_ingestor=file_ingestor,
         daily_environment=daily_environment,
         max_user_bytes=profile_config.profiles[profile_config.default_profile].context_window_bytes,
         archive_envelope=gateway.archive_envelope,
@@ -330,6 +336,10 @@ def build_services(
     )
     cross_tools = CrossSessionToolset(cross_sessions, account)
     project_tools = ProjectTools(workspace)
+    workspace_tools = WorkspaceToolset(
+        workspace,
+        command_owner_ids=profile_config.command_owner_ids,
+    )
     idle_tools = IdleActivityToolset(time_scheduler)
 
     def profile_tools(profile: AgentProfile, _model: Any) -> list[Any]:
@@ -345,12 +355,13 @@ def build_services(
             "wechat": tools.agent_tools(),
             "cross_session": cross_tools.agent_tools(),
             "project": project_tools.agent_tools(),
+            "workspace": workspace_tools.agent_tools(),
             "web": web_tools,
             "status": ReadOnlyToolset(
                 AgentToolStatus(
                     mode="selfhosted_group",
                     automatic_send_enabled=True,
-                    supported_sends=("text", "image", "quoted_reply"),
+                    supported_sends=("text", "image", "file", "quoted_reply"),
                 )
             ).agent_tools(),
         }
@@ -369,6 +380,7 @@ def build_services(
         model_overrides=model_overrides,
         image_ingestor=image_ingestor,
         voice_ingestor=voice_ingestor,
+        file_ingestor=file_ingestor,
         daily_environment=daily_environment,
         message_ingestor=message_ingestor,
         context_builder=context_builder,
@@ -377,6 +389,7 @@ def build_services(
         cross_sessions=cross_sessions,
         cross_tools=cross_tools,
         project_tools=project_tools,
+        workspace_tools=workspace_tools,
         idle_tools=idle_tools,
         profile_tools=profile_tools,
     )
@@ -704,6 +717,7 @@ def build_runtime_bundle(
         memory_store=services.memory_store,
         image_ingestor=services.image_ingestor,
         voice_ingestor=services.voice_ingestor,
+        file_ingestor=services.file_ingestor,
         daily_environment=services.daily_environment,
         record_activity=record_session_activity,
         delivery_state=services.tools.delivery_state,
@@ -732,6 +746,7 @@ def build_runtime_bundle(
         registry=registry,
         archive_envelope=gateway.archive_envelope,
         provider_check=providers.provider_check,
+        on_model_indeterminate=providers.refresh_gemini_clients,
     )
 
     async def run_idle_event(event_id: str, event_number: int, model_id: str) -> None:

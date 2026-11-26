@@ -157,6 +157,21 @@ CREATE TABLE IF NOT EXISTS message_audio (
 );
 CREATE INDEX IF NOT EXISTS audio_scope_time
   ON message_audio(account_id,conversation_id,created_at);
+CREATE TABLE IF NOT EXISTS message_files (
+  file_id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  message_id TEXT NOT NULL UNIQUE REFERENCES source_messages(message_id),
+  original_references_json TEXT NOT NULL DEFAULT '[]',
+  filename TEXT NOT NULL, fileext TEXT NOT NULL DEFAULT '',
+  expected_bytes INTEGER, expected_md5 TEXT,
+  state TEXT NOT NULL CHECK(state IN ('pending','ready','failed','deleted')),
+  artifact_path TEXT, mime_type TEXT, byte_count INTEGER,
+  sha256 TEXT, error_code TEXT,
+  summary TEXT, summary_model_id TEXT, summarized_at TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS file_scope_time
+  ON message_files(account_id,conversation_id,created_at);
 """
 
 

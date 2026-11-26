@@ -19,8 +19,10 @@ from .base import (
     VoicePayload,
     WeChatGateway,
     connector_ensure_ready,
+    connector_fetch_received_file,
     connector_in_scope,
     connector_normalize_event,
+    connector_send_file,
     connector_verify_request,
     create_gateway,
     default_gateway_factory,
@@ -143,6 +145,13 @@ class RouterGateway:
             self._active_account_id(), conversation_id
         ).send_image(conversation_id, path)
 
+    def send_file(self, conversation_id: str, path: Path) -> tuple[str, str | None]:
+        return connector_send_file(
+            self._route(self._active_account_id(), conversation_id),
+            conversation_id,
+            path,
+        )
+
     def send_quote(
         self,
         conversation_id: str,
@@ -179,6 +188,19 @@ class RouterGateway:
         return self._route(
             item.account_id, item.conversation_id, item.source_id
         ).fetch_thumbnail(item, references, destination)
+
+    def fetch_received_file(
+        self,
+        item: MessageEvent,
+        references: list[dict[str, str]],
+        destination: Path,
+    ) -> tuple[str, int]:
+        return connector_fetch_received_file(
+            self._route(item.account_id, item.conversation_id, item.source_id),
+            item,
+            references,
+            destination,
+        )
 
     def fetch_account_cached_original(
         self,

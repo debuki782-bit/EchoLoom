@@ -13,10 +13,18 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from PIL import Image
 
-from ..media_artifacts import MAX_ORIGINAL_IMAGE_BYTES, ImageIngestError, _file_hash, _file_md5
 from ..connectors.base import MessageEvent
+from ..media_artifacts import (
+    MAX_FILE_BYTES,
+    MAX_ORIGINAL_IMAGE_BYTES,
+    FileIngestError,
+    ImageIngestError,
+    _file_hash,
+    _file_md5,
+)
 
 _MD5 = re.compile(r"^[0-9a-fA-F]{32}$")
+_CDN_ATTACH_ID = re.compile(r"^@cdn_([0-9a-fA-F]{40,4096})_([0-9a-fA-F]{32})_\d+$")
 _WECHAT_HTTP_FALLBACK_HOSTS = frozenset({"vweixinf.tc.qq.com", "wxapp.tc.qq.com"})
 
 
@@ -118,6 +126,109 @@ class HookImageSource:
         if has_md5_reference:
             raise ImageIngestError("original_image_not_found_in_cache")
         raise ImageIngestError("original_image_url_or_id_missing")
+
+    def fetch_received_file(
+        self,
+        item: MessageEvent,
+        references: list[dict[str, str]],
+        destination: Path,
+    ) -> tuple[str, int]:
+        """Resolve an incoming chat file from local cache or native :30002 download."""
+        values = {ref.get("field"): ref.get("value", "") for ref in references}
+        title = values.get("title", "").strip()
+        raw_md5 = values.get("md5", "").strip().lower()
+        expected_md5 = raw_md5 if _MD5.fullmatch(raw_md5) else ""
+        totallen_raw = values.get("totallen", "").strip()
+        expected_len = (
+            int(totallen_raw)
+            if totallen_raw.isdigit() and 0 < int(totallen_raw) <= MAX_FILE_BYTES
+            else 0
+        )
+
+        local = self._find_local_received_file(
+            item,
+            title=title,
+            expected_md5=expected_md5,
+            expected_len=expected_len,
+        )
+        if local is not None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with local.open("rb") as src, destination.open("wb") as dst:
+                while chunk := src.read(1024 * 1024):
+                    dst.write(chunk)
+            return _file_hash(destination)
+
+        if self.native_downloader is not None and self.native_downloader.fetch_file(
+            item.account_id, references, destination,
+        ):
+            digest, size = _file_hash(destination)
+            if expected_len and size != expected_len:
+                destination.unlink(missing_ok=True)
+                raise FileIngestError("received_file_size_mismatch")
+            if expected_md5 and _file_md5(destination) != expected_md5:
+                destination.unlink(missing_ok=True)
+                raise FileIngestError("received_file_md5_mismatch")
+            return digest, size
+
+        raise FileIngestError("received_file_not_found")
+
+    def _find_local_received_file(
+        self,
+        item: MessageEvent,
+        *,
+        title: str,
+        expected_md5: str,
+        expected_len: int,
+    ) -> Path | None:
+        if not self.source_root.is_dir():
+            return None
+        source_root = self.source_root.resolve()
+        account_dirs = [
+            path for path in self.source_root.iterdir()
+            if path.is_dir() and (
+                path.name.casefold() == item.account_id.casefold()
+                or path.name.casefold().startswith(item.account_id.casefold() + "_")
+            )
+        ]
+        candidates: list[Path] = []
+        for account_dir in account_dirs:
+            file_dir = account_dir / "msg" / "file"
+            if not file_dir.is_dir():
+                continue
+            for entry in file_dir.rglob("*"):
+                if not entry.is_file():
+                    continue
+                try:
+                    resolved = entry.resolve()
+                    stat = resolved.stat()
+                except OSError:
+                    continue
+                if not resolved.is_relative_to(source_root):
+                    raise FileIngestError("source_path_out_of_scope")
+                if stat.st_size <= 0 or stat.st_size > MAX_FILE_BYTES:
+                    continue
+                if expected_len and stat.st_size != expected_len:
+                    continue
+                candidates.append(resolved)
+
+        if not candidates:
+            return None
+        title_cf = title.casefold()
+        candidates.sort(key=lambda p: (
+            p.name != title,
+            p.name.casefold() != title_cf,
+            -p.stat().st_mtime,
+        ))
+        if expected_md5:
+            for candidate in candidates[:64]:
+                if _file_md5(candidate) == expected_md5:
+                    return candidate
+            return None
+        if title and expected_len:
+            exact_named = [p for p in candidates if p.name == title or p.name.casefold() == title_cf]
+            if exact_named:
+                return exact_named[0]
+        return None
 
 
     def _fetch_account_cached_original(

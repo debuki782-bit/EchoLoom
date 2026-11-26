@@ -23,7 +23,7 @@ from .idle_tools import IdleActivityToolset
 from .memory_store import MemoryStore
 from .project_tools import ProjectTools
 from .tool_policy import read_policy, set_tool_enabled
-from .toolsets import MediaToolset, MemoryToolset, ReplyToolset
+from .toolsets import MediaToolset, MemoryToolset, ReplyToolset, WorkspaceToolset
 from .trace_view import DEFAULT_TRACE_DIR, _format_time, _record_epoch, load_records
 from .web_tools import WebToolset
 from .wechat_gateway import GatewayConfig, create_gateway, default_gateway_factory
@@ -57,7 +57,12 @@ def tool_inventory(records: list[dict]) -> list[dict]:
         | _tool_names(MediaToolset)
         | _tool_names(MemoryToolset)
     )
-    shared = wechat | _tool_names(CrossSessionToolset) | _tool_names(ProjectTools)
+    shared = (
+        wechat
+        | _tool_names(CrossSessionToolset)
+        | _tool_names(ProjectTools)
+        | _tool_names(WorkspaceToolset)
+    )
     main = shared | _tool_names(WebToolset) | _tool_names(ReadOnlyToolset)
     idle = main | _tool_names(IdleActivityToolset)
     desc_path = prompt_catalog._resolve_prompt_file("tool_descriptions.json")
