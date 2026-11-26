@@ -141,10 +141,26 @@ if ($UpstreamDir) {
 # 2. Apply EchoLoom patches (loopback 127.0.0.1, default callback, group atlist, SendFileMsg, hardened launcher)
 Push-Location $srcDir
 try {
+    # Isolate extracted/copied source from any parent EchoLoom .git repo so
+    # `git apply` never skips `diff --git` headers under ignored build dirs.
+    if (-not (Test-Path -LiteralPath '.git')) {
+        & $gitCmd.Source init -q
+        if ($LASTEXITCODE -ne 0) { throw "git init failed with exit code $LASTEXITCODE" }
+    }
     foreach ($pf in $patchFiles) {
         Write-Host "Applying patch: $($pf.Name)"
-        & $gitCmd.Source apply --ignore-space-change --ignore-whitespace --whitespace=nowarn $pf.FullName
-        if ($LASTEXITCODE -ne 0) { throw "git apply failed on $($pf.Name) with exit code $LASTEXITCODE" }
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $applyOut = & $gitCmd.Source apply --verbose --ignore-space-change --ignore-whitespace --whitespace=nowarn $pf.FullName 2>&1
+            $applyExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevPref
+        }
+        $applyOut | ForEach-Object { Write-Host $_ }
+        if ($applyExit -ne 0 -or (($applyOut | Out-String) -match 'Skipped patch')) {
+            throw "git apply failed or skipped hunks on $($pf.Name) (exit=$applyExit)"
+        }
     }
 } finally {
     Pop-Location

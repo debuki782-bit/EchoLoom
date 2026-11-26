@@ -15,11 +15,11 @@
 
 ## 2. 我们对上游 Hook 改了什么
 
-补丁 [`patches/0001-echoloom-hardening-and-atlist.patch`](patches/0001-echoloom-hardening-and-atlist.patch) 仅对上游固定提交做了 4 处收敛改动：
+补丁 [`patches/0001-echoloom-hardening-and-atlist.patch`](patches/0001-echoloom-hardening-and-atlist.patch) 与 [`patches/0002-sendfile-msg.patch`](patches/0002-sendfile-msg.patch) 对上游固定提交做了以下增强：
 
 1. **回环安全加固**：将 HTTP 服务监听从 `0.0.0.0` 改为 `127.0.0.1`（禁止局域网暴露）。
 2. **默认回调地址**：`g_CallBack_Url` 默认指向 `http://127.0.0.1:8080/callback`（支持通过 `ECHOLOOM_CALLBACK_URL` / `ECHOLOOM_HOOK_PORT` 覆盖）。
-3. **群聊 @ 提及支持**：为 `/SendTextMsg` 增加 `atlist` 参数与 `<atuserlist>` XML 校验，透传至原生文本构造。
+3. **群聊 @ 提及与文件发送**：为 `/SendTextMsg` 增加 `atlist` 参数与 `<atuserlist>` XML 校验，并新增 `/SendFileMsg` 路由支持文件 CDN 上传与 type 6 文件消息发送。
 4. **启动器加固**：校验 `Weixin.exe == 4.1.10.27` 精确版本、避免误注入子进程、加载同目录独立命名的 `wx_agent_hook.dll`（不与 `System32\version.dll` 重名）、支持 `ECHOLOOM_WEIXIN_EXE` 自定义安装路径及无弹窗 `--start` 模式。
 
 ## 3. 一键构建全部组件
@@ -47,7 +47,7 @@
 
    [sources.wechat]
    enabled = true
-   factory = "wechat_agent.connectors.wechat_hook:WeChatHookConnector"
+   factory = "echoloom.connectors.wechat_hook:WeChatHookConnector"
    channel = "wechat"
    base_url = "http://127.0.0.1:30001"
    native_download_url = "http://127.0.0.1:30002"
