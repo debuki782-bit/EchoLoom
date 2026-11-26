@@ -35,16 +35,20 @@ class NativeAdapter:
         self.session.on("detached", lambda *_: self.detached.set())
         script = r'''
         const adapter = Module.load(ADAPTER);
+        const optionalFn = (name, ret, args) => {
+            const addr = adapter.findExportByName(name);
+            return addr ? new NativeFunction(addr, ret, args) : null;
+        };
         const init = new NativeFunction(adapter.getExportByName('ImageDownloadInitialize'), 'int', []);
         const ready = new NativeFunction(adapter.getExportByName('ImageDownloadReady'), 'int', []);
-        const uploadReady = new NativeFunction(adapter.getExportByName('FileUploadReady'), 'int', []);
+        const uploadReady = optionalFn('FileUploadReady', 'int', []);
         const submit = new NativeFunction(adapter.getExportByName('ImageDownloadSubmitKnown'),
             'int', ['pointer', 'pointer', 'pointer', 'uint', 'uint64']);
-        const submitFileDl = new NativeFunction(adapter.getExportByName('FileDownloadSubmit'),
+        const submitFileDl = optionalFn('FileDownloadSubmit',
             'int', ['pointer', 'pointer', 'pointer', 'pointer', 'uint', 'uint64']);
-        const submitFileUl = new NativeFunction(adapter.getExportByName('FileUploadSubmit'),
+        const submitFileUl = optionalFn('FileUploadSubmit',
             'int', ['pointer', 'pointer', 'uint']);
-        const popFileUl = new NativeFunction(adapter.getExportByName('FileUploadPopResult'),
+        const popFileUl = optionalFn('FileUploadPopResult',
             'int', ['pointer', 'pointer', 'pointer', 'size_t', 'pointer', 'size_t', 'pointer']);
         const wx = Process.getModuleByName('Weixin.dll');
         const bound = new Map(), completed = new Map();
@@ -68,7 +72,7 @@ class NativeAdapter:
         rpc.exports = {
             initialize() { return init(); },
             ready() { return ready(); },
-            uploadReady() { return uploadReady(); },
+            uploadReady() { return uploadReady ? uploadReady() : 0; },
             submit(id, path, key, type, bytes) {
                 bound.set(key, id);
                 const result = submit(Memory.allocUtf8String(id), Memory.allocUtf8String(path),
@@ -77,6 +81,7 @@ class NativeAdapter:
                 return result;
             },
             submitFileDownload(id, aeskey, path, key, type, bytes) {
+                if (!submitFileDl) return -1;
                 bound.set(key, id);
                 const result = submitFileDl(Memory.allocUtf8String(id), Memory.allocUtf8String(aeskey),
                     Memory.allocUtf8String(path), Memory.allocUtf8String(key), type, bytes);
@@ -84,9 +89,11 @@ class NativeAdapter:
                 return result;
             },
             submitFileUpload(path, key, fileType) {
+                if (!submitFileUl) return -1;
                 return submitFileUl(Memory.allocUtf8String(path), Memory.allocUtf8String(key), fileType);
             },
             popFileUpload(key) {
+                if (!popFileUl) return {completed: false, rc: -1};
                 const outCode = Memory.alloc(4);
                 const outBytes = Memory.alloc(8);
                 const fileIdCap = 4096;
