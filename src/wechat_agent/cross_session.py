@@ -106,6 +106,28 @@ _TABLE_COLUMNS: dict[str, frozenset[str]] = {
             "transcript_state",
         }
     ),
+    "message_files": frozenset(
+        {
+            "file_id",
+            "account_id",
+            "conversation_id",
+            "message_id",
+            "filename",
+            "fileext",
+            "expected_bytes",
+            "expected_md5",
+            "state",
+            "mime_type",
+            "byte_count",
+            "sha256",
+            "error_code",
+            "summary",
+            "summary_model_id",
+            "summarized_at",
+            "created_at",
+            "updated_at",
+        }
+    ),
     "user_facts": frozenset(
         {
             "fact_id",

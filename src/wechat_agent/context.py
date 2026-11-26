@@ -148,6 +148,7 @@ class ContextTurn:
     sender_gap_minutes: int | None = None
     image_metadata: Mapping[str, object] | None = None
     audio_metadata: Mapping[str, object] | None = None
+    file_metadata: Mapping[str, object] | None = None
     message_time: Mapping[str, object] | None = None
     source_conversation_id: str | None = None
     source_is_group: bool | None = None
@@ -554,6 +555,16 @@ def _message_text(
         return ("[表情/贴图消息]" if message.get("media_kind") == "sticker" else "[图片消息]"), None
     if message.get("kind") == "voice_message":
         return "[语音消息]", None
+    if message.get("kind") == "file_message":
+        name = str(message.get("filename") or message.get("text") or "未命名文件").strip()
+        ext = str(message.get("fileext") or "").strip()
+        size_val = message.get("size_bytes")
+        details = [part for part in (ext, f"{size_val} B" if isinstance(size_val, int) else "") if part]
+        suffix = f"（{'，'.join(details)}）" if details else ""
+        return f"[文件消息] {name}{suffix}", None
+    if message.get("kind") == "file_upload_notice":
+        name = str(message.get("filename") or message.get("text") or "未命名文件").strip()
+        return f"[文件传输通知] {name}（对方上传准备中）", None
     if message.get("kind") == "pat_message":
         suffix = str(message.get("suffix") or "")[:256]
         return (f"[拍一拍] {message.get('actor_id')} 拍了拍 {message.get('target_id')}"
@@ -695,6 +706,19 @@ def _format_turn(
         transcript = turn.audio_metadata.get("transcript")
         if transcript:
             rendered += f"\n语音转写：{_one_line(transcript)}"
+    if turn.file_metadata:
+        file_id = turn.file_metadata.get("file_id")
+        state = turn.file_metadata.get("state")
+        filename = turn.file_metadata.get("filename")
+        byte_count = turn.file_metadata.get("byte_count") or turn.file_metadata.get("expected_bytes")
+        if file_id or state:
+            size_part = f"，大小：{byte_count} B" if isinstance(byte_count, int) else ""
+            name_part = f" {filename}" if filename else ""
+            rendered += f"\n文件：{file_id or '无可用文件 ID'}{name_part}（状态：{state or '未知'}{size_part}）"
+        summary = turn.file_metadata.get("summary")
+        if summary:
+            model_id = turn.file_metadata.get("summary_model_id")
+            rendered += f"\n文件摘要{f'〔{model_id}〕' if model_id else ''}：{_one_line(summary)}"
     return rendered
 
 
@@ -797,6 +821,7 @@ def _record_turn(item: Mapping[str, object], *, sender_origin: str) -> ContextTu
     sender_tags = item.get("sender_tags")
     image = item.get("image")
     audio = item.get("audio")
+    file_meta = item.get("file")
     message_time = item.get("message_time", item.get("event_time_context"))
     quote_target = item.get("quote_target")
     source_conversation_id = item.get("source_conversation_id", conversation_id)
@@ -828,6 +853,7 @@ def _record_turn(item: Mapping[str, object], *, sender_origin: str) -> ContextTu
         ),
         image_metadata=image if isinstance(image, Mapping) else None,
         audio_metadata=audio if isinstance(audio, Mapping) else None,
+        file_metadata=file_meta if isinstance(file_meta, Mapping) else None,
         message_time=message_time if isinstance(message_time, Mapping) else None,
         source_conversation_id=(
             source_conversation_id if isinstance(source_conversation_id, str) else None

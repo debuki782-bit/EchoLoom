@@ -65,6 +65,7 @@ class MemoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._media_root = (path.parent / "received-images").resolve()
         self._audio_root = (path.parent / "received-audio").resolve()
+        self._file_root = (path.parent / "received-files").resolve()
         self.path = Path(path).resolve()
         self._lock = threading.RLock()
         self.db = sqlite3.connect(path, timeout=1, check_same_thread=False)
@@ -220,6 +221,21 @@ class MemoryStore:
             );
             CREATE INDEX IF NOT EXISTS audio_scope_time
               ON message_audio(account_id,conversation_id,created_at);
+            CREATE TABLE IF NOT EXISTS message_files (
+              file_id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
+              conversation_id TEXT NOT NULL,
+              message_id TEXT NOT NULL UNIQUE REFERENCES source_messages(message_id),
+              original_references_json TEXT NOT NULL DEFAULT '[]',
+              filename TEXT NOT NULL, fileext TEXT NOT NULL DEFAULT '',
+              expected_bytes INTEGER, expected_md5 TEXT,
+              state TEXT NOT NULL CHECK(state IN ('pending','ready','failed','deleted')),
+              artifact_path TEXT, mime_type TEXT, byte_count INTEGER,
+              sha256 TEXT, error_code TEXT,
+              summary TEXT, summary_model_id TEXT, summarized_at TEXT,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS file_scope_time
+              ON message_files(account_id,conversation_id,created_at);
             """
         )
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(source_messages)")}
@@ -300,6 +316,7 @@ class MemoryStore:
             self.transaction,
             media_root=self._media_root,
             audio_root=self._audio_root,
+            file_root=self._file_root,
             messages=self.messages,
             knowledge=self.knowledge,
         )
@@ -323,6 +340,16 @@ class MemoryStore:
         self._audio_root = value
         if hasattr(self, "media"):
             self.media.audio_root = value
+
+    @property
+    def file_root(self) -> Path:
+        return self._file_root
+
+    @file_root.setter
+    def file_root(self, value: Path) -> None:
+        self._file_root = value
+        if hasattr(self, "media"):
+            self.media.file_root = value
 
     @contextmanager
     def transaction(self):
@@ -491,6 +518,7 @@ class MemoryStore:
         jev_by_message: dict[str, dict[str, object]] = {}
         images_by_message: dict[str, dict[str, object]] = {}
         audio_by_message: dict[str, dict[str, object]] = {}
+        files_by_message: dict[str, dict[str, object]] = {}
         with self._lock:
             if message_ids:
                 notes_by_message = self.knowledge.notes_for_messages(
@@ -509,12 +537,17 @@ class MemoryStore:
                     account_id=account_id,
                     message_ids=message_ids,
                 )
+                files_by_message = self.media.file_metadata_for_messages(
+                    account_id=account_id,
+                    message_ids=message_ids,
+                )
         search_texts = []
         for item in messages:
             message_id = item.get("message_id")
             key = message_id if isinstance(message_id, str) else ""
             base_image = item.get("image")
             base_audio = item.get("audio")
+            base_file = item.get("file")
             image = {
                 **(dict(base_image) if isinstance(base_image, Mapping) else {}),
                 **images_by_message.get(key, {}),
@@ -522,6 +555,10 @@ class MemoryStore:
             audio = {
                 **(dict(base_audio) if isinstance(base_audio, Mapping) else {}),
                 **audio_by_message.get(key, {}),
+            }
+            file_meta = {
+                **(dict(base_file) if isinstance(base_file, Mapping) else {}),
+                **files_by_message.get(key, {}),
             }
             search_texts.append(
                 "\n".join(
@@ -531,6 +568,8 @@ class MemoryStore:
                         item.get("body_text"),
                         (image or {}).get("vision_summary"),
                         (audio or {}).get("transcript"),
+                        (file_meta or {}).get("filename"),
+                        (file_meta or {}).get("summary"),
                     )
                     if value
                 )[:12000]
@@ -598,6 +637,11 @@ class MemoryStore:
                         **audio_by_message.get(cache_key or "", {}),
                     }
                     or None,
+                    "file": {
+                        **(dict(item["file"]) if isinstance(item.get("file"), Mapping) else {}),
+                        **files_by_message.get(cache_key or "", {}),
+                    }
+                    or None,
                 }
             )
             if cache_key:
@@ -613,6 +657,7 @@ class MemoryStore:
                         "sender_gap_minutes",
                         "image",
                         "audio",
+                        "file",
                     )
                 }
             enriched.append(data)
@@ -1143,6 +1188,162 @@ class MemoryStore:
             audio_id=audio_id,
             account_id=account_id,
             state=state,
+        )
+
+    def begin_file_ingest(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        message_id: str,
+        original_references: Sequence[dict[str, str]],
+        filename: str,
+        fileext: str = "",
+        expected_bytes: int | None = None,
+        expected_md5: str | None = None,
+    ) -> dict[str, object]:
+        return self.media.begin_file_ingest(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            original_references=original_references,
+            filename=filename,
+            fileext=fileext,
+            expected_bytes=expected_bytes,
+            expected_md5=expected_md5,
+        )
+
+    def complete_file_ingest(
+        self,
+        *,
+        file_id: str,
+        account_id: str,
+        artifact_path: str,
+        mime_type: str,
+        byte_count: int,
+        sha256: str,
+    ) -> None:
+        self.media.complete_file_ingest(
+            file_id=file_id,
+            account_id=account_id,
+            artifact_path=artifact_path,
+            mime_type=mime_type,
+            byte_count=byte_count,
+            sha256=sha256,
+        )
+
+    def fail_file_ingest_for_message(
+        self,
+        *,
+        account_id: str,
+        message_id: str,
+        error_code: str,
+        filename: str = "unnamed",
+        fileext: str = "",
+        expected_bytes: int | None = None,
+        expected_md5: str | None = None,
+    ) -> dict[str, object]:
+        return self.media.fail_file_ingest_for_message(
+            account_id=account_id,
+            message_id=message_id,
+            error_code=error_code,
+            filename=filename,
+            fileext=fileext,
+            expected_bytes=expected_bytes,
+            expected_md5=expected_md5,
+        )
+
+    def archive_agent_file(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        artifact_path: Path,
+        filename: str,
+        mime_type: str,
+        operation_id: str,
+        delivery_state: str,
+    ) -> dict[str, str]:
+        return self.media.archive_agent_file(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            artifact_path=artifact_path,
+            filename=filename,
+            mime_type=mime_type,
+            operation_id=operation_id,
+            delivery_state=delivery_state,
+        )
+
+    def file_metadata_for_message(
+        self, *, account_id: str, message_id: str
+    ) -> dict[str, object] | None:
+        return self.media.file_metadata_for_message(
+            account_id=account_id,
+            message_id=message_id,
+        )
+
+    def get_file_for_message(
+        self, *, account_id: str, conversation_id: str, message_id: str
+    ) -> dict[str, object] | None:
+        return self.media.get_file_for_message(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            message_id=message_id,
+        )
+
+    def get_file_by_id(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str | None,
+        file_id: str,
+        include_unready: bool = False,
+    ) -> dict[str, object] | None:
+        return self.media.get_file_by_id(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            file_id=file_id,
+            include_unready=include_unready,
+        )
+
+    def get_latest_ready_file(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str,
+        before_message_id: str | None = None,
+        include_unready: bool = False,
+    ) -> dict[str, object] | None:
+        return self.media.get_latest_ready_file(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            before_message_id=before_message_id,
+            include_unready=include_unready,
+        )
+
+    def list_files(
+        self,
+        *,
+        account_id: str,
+        conversation_id: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, object]]:
+        return self.media.list_files(
+            account_id=account_id,
+            conversation_id=conversation_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def save_file_summary(
+        self, *, account_id: str, file_id: str, summary: str, model_id: str
+    ) -> None:
+        self.media.save_file_summary(
+            account_id=account_id,
+            file_id=file_id,
+            summary=summary,
+            model_id=model_id,
         )
 
     # ------------------------------------------------------------------

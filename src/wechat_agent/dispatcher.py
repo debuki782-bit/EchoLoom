@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import os
 import sqlite3
@@ -20,14 +21,14 @@ from .context_assembler import AssembledBatch, MessageContextAssembler
 from .context_builder import ContextBuilder, ContextSpec
 from .conversation_scheduler import ConversationScheduler, MessageBatch
 from .ingress import sha
-from .media import WeChatImageIngestor, WeChatVoiceIngestor
+from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
 from .memory_store import MemoryStore
 from .message_ingestor import MessageIngestor
 from .models import ReplyDraft
 from .outbound import OutboundService
 from .runtime_contract import BudgetExhausted as AdkBudgetExhausted
+from .runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
 from .runtime_contract import ModelCallsLimitExceeded as LlmCallsLimitExceededError
-from .runtime_contract import ModelProviderUnavailable
 from .temporal_context import DailyEnvironmentProvider
 from .tool_timing import turn_deadline_monotonic, turn_started_monotonic
 from .turn_scope import operation_receipt_ids, tool_turn_scope
@@ -214,6 +215,7 @@ class Dispatcher:
         memory_store: MemoryStore | None = None,
         image_ingestor: WeChatImageIngestor | None = None,
         voice_ingestor: WeChatVoiceIngestor | None = None,
+        file_ingestor: WeChatFileIngestor | None = None,
         daily_environment: DailyEnvironmentProvider | None = None,
         record_activity: Callable[[str, str], Awaitable[None]] | None = None,
         delivery_state: Callable[[str], dict[str, object]] | None = None,
@@ -231,6 +233,9 @@ class Dispatcher:
         provider_check: Callable[[], Awaitable[bool]] | None = None,
         provider_probe_base_seconds: float = 5.0,
         provider_probe_max_seconds: float = 30.0,
+        on_model_indeterminate: Callable[[], Awaitable[None] | None] | None = None,
+        indeterminate_cooldown_base_seconds: float = 30.0,
+        indeterminate_cooldown_max_seconds: float = 600.0,
         in_scope: Callable[[MessageEvent], bool] | None = None,
         is_paused: Callable[[], bool] | None = None,
         is_wechat_ready: Callable[[], bool] | None = None,
@@ -261,6 +266,7 @@ class Dispatcher:
         self.memory_store = memory_store
         self.image_ingestor = image_ingestor
         self.voice_ingestor = voice_ingestor
+        self.file_ingestor = file_ingestor
         self.daily_environment = daily_environment
         self.record_activity = record_activity
         self.delivery_state = delivery_state
@@ -277,6 +283,7 @@ class Dispatcher:
             memory_store,
             image_ingestor=image_ingestor,
             voice_ingestor=voice_ingestor,
+            file_ingestor=file_ingestor,
             archive_envelope=archive_envelope,
         )
         self._default_builder = ContextBuilder(
@@ -293,6 +300,14 @@ class Dispatcher:
         self._provider_failures = 0
         self._provider_next_probe_monotonic = 0.0
         self._provider_probe_lock = asyncio.Lock()
+        self.on_model_indeterminate = on_model_indeterminate
+        self._indeterminate_cooldown_base_seconds = max(0.0, float(indeterminate_cooldown_base_seconds))
+        self._indeterminate_cooldown_max_seconds = max(
+            self._indeterminate_cooldown_base_seconds,
+            float(indeterminate_cooldown_max_seconds),
+        )
+        self._indeterminate_failures = 0
+        self._indeterminate_cooldown_until_monotonic = 0.0
         self._in_scope = in_scope or (lambda item: item.account_id == self.account)
         self._is_paused = is_paused or (lambda: False)
         self._is_wechat_ready = is_wechat_ready or (lambda: True)
@@ -381,6 +396,67 @@ class Dispatcher:
             self._provider_failures = 0
             self._provider_next_probe_monotonic = 0.0
             self.scheduler.wake_deferred_batches()
+        self._indeterminate_failures = 0
+        self._indeterminate_cooldown_until_monotonic = 0.0
+
+    def trip_indeterminate_cooldown(self, reason: str) -> float:
+        """Apply worker-wide exponential cooldown after ambiguous timeout/upstream errors."""
+        self._indeterminate_failures += 1
+        if self._indeterminate_cooldown_base_seconds <= 0:
+            cooldown = 0.0
+        else:
+            exponent = min(max(0, self._indeterminate_failures - 1), 5)
+            cooldown = min(
+                self._indeterminate_cooldown_max_seconds,
+                self._indeterminate_cooldown_base_seconds * (2 ** exponent),
+            )
+        self._indeterminate_cooldown_until_monotonic = max(
+            self._indeterminate_cooldown_until_monotonic,
+            time.monotonic() + cooldown,
+        )
+        logger.warning(
+            "event=model_indeterminate_cooldown reason=%s failures=%s cooldown_seconds=%.2f",
+            reason,
+            self._indeterminate_failures,
+            cooldown,
+        )
+        return cooldown
+
+    def _batch_has_side_effect(self, batch_scope: str) -> bool:
+        delivery = self.current_delivery_state(batch_scope)
+        return (
+            int(delivery.get("send_attempt_count", 0) or 0) > 0
+            or delivery.get("last_send_status")
+            in ("queued", "accepted_by_server", "unknown")
+        )
+
+    async def handle_model_indeterminate(
+        self,
+        batch: MessageBatch | None = None,
+        *,
+        reason: str = "worker_turn_indeterminate",
+        scope_override: str | None = None,
+    ) -> tuple[float, bool]:
+        """Recycle stale provider clients, open cooldown, and check outbound side effects."""
+        if self.on_model_indeterminate is not None:
+            try:
+                outcome = self.on_model_indeterminate()
+                if inspect.isawaitable(outcome):
+                    await outcome
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - client refresh must stay non-fatal
+                logger.warning(
+                    "event=indeterminate_client_refresh_failed error_type=%s",
+                    type(exc).__name__,
+                )
+        cooldown = self.trip_indeterminate_cooldown(reason)
+        if batch is not None:
+            scope = hashlib.sha256(f"batch\0{batch.batch_id}".encode()).hexdigest()
+        else:
+            scope = str(scope_override or "")
+        has_side_effect = self._batch_has_side_effect(scope) if scope else False
+        return cooldown, has_side_effect
 
     async def ensure_provider_ready(self) -> bool:
         if self._provider_ready:
@@ -768,6 +844,9 @@ class Dispatcher:
             if isinstance(exc, ModelProviderUnavailable):
                 state = "provider_unavailable"
                 raise
+            if isinstance(exc, ModelCallIndeterminate):
+                state = "model_call_indeterminate"
+                raise
         finally:
             turn_started_monotonic.reset(timing_token)
             turn_scope.close()
@@ -855,12 +934,7 @@ class Dispatcher:
             )
         except ModelProviderUnavailable:
             batch_receipt = hashlib.sha256(f"batch\0{batch.batch_id}".encode()).hexdigest()
-            delivery = self.current_delivery_state(batch_receipt)
-            has_side_effect = (
-                int(delivery.get("send_attempt_count", 0) or 0) > 0
-                or delivery.get("last_send_status")
-                in ("queued", "accepted_by_server", "unknown")
-            )
+            has_side_effect = self._batch_has_side_effect(batch_receipt)
             if not has_side_effect:
                 delay = self.trip_provider_circuit("worker_turn_unavailable")
                 self.scheduler.defer_batch(
@@ -873,6 +947,30 @@ class Dispatcher:
                     "event=worker_batch_provider_unavailable_after_send batch=%s",
                     batch.batch_id[:12],
                 )
+        except ModelCallIndeterminate:
+            cooldown, has_side_effect = await self.handle_model_indeterminate(
+                batch,
+                reason="worker_turn_indeterminate",
+            )
+            retry_error = (
+                "model_indeterminate_after_send"
+                if has_side_effect
+                else "model_call_indeterminate"
+            )
+            logger.warning(
+                "event=worker_batch_indeterminate batch=%s has_side_effect=%s "
+                "failures=%s cooldown_seconds=%.2f",
+                batch.batch_id[:12],
+                has_side_effect,
+                self._indeterminate_failures,
+                cooldown,
+            )
+            self.scheduler.release_for_retry(
+                batch,
+                retry_error,
+                min_delay_seconds=cooldown,
+            )
+            deferred = True
         except Exception as exc:  # noqa: BLE001
             retry_error = type(exc).__name__
             logger.warning(
@@ -1068,6 +1166,12 @@ class Dispatcher:
                             # Half-Open trial without provider_check: ensure deferred rows
                             # are claimable together with any newer inbound messages.
                             self.scheduler.wake_deferred_batches()
+                    cooldown_remaining = (
+                        self._indeterminate_cooldown_until_monotonic - time.monotonic()
+                    )
+                    if cooldown_remaining > 0:
+                        await asyncio.sleep(min(0.5, cooldown_remaining))
+                        continue
                     blocked = (
                         self.blocked_conversations_provider()
                         if self.blocked_conversations_provider is not None

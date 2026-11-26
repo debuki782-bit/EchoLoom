@@ -9,8 +9,9 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
-from ..contacts import is_contact_id, is_room_id
 from ..connectors.base import AccountState, GatewayConfig, MessageEvent, VoicePayload
+from ..contacts import is_contact_id, is_room_id
+from ..media_artifacts import MAX_FILE_BYTES
 from .hook_contacts import HookContactResolver
 from .hook_events import archive_envelope, parse_callback
 from .hook_media import HookImageSource, wechat_storage_root_from_status
@@ -27,9 +28,45 @@ def profile_matches_account(status: dict, account: str) -> bool:
                for part in profile_path.replace("/", "\\").split("\\"))
 
 
+def _build_file_appmsg_xml(
+    title: str,
+    fileext: str,
+    size_bytes: int,
+    md5_hex: str,
+    fileid: str,
+    aeskey: str,
+) -> str:
+    appmsg = ET.Element("appmsg", {"appid": "", "sdkver": "0"})
+    ET.SubElement(appmsg, "title").text = title
+    ET.SubElement(appmsg, "des").text = ""
+    ET.SubElement(appmsg, "action").text = "view"
+    ET.SubElement(appmsg, "type").text = "6"
+    ET.SubElement(appmsg, "showtype").text = "0"
+    ET.SubElement(appmsg, "soundtype").text = "0"
+    ET.SubElement(appmsg, "mediatagname").text = ""
+    ET.SubElement(appmsg, "messageext").text = ""
+    ET.SubElement(appmsg, "messageaction").text = ""
+    ET.SubElement(appmsg, "content").text = ""
+    ET.SubElement(appmsg, "contentattr").text = "0"
+    for empty_tag in ("url", "lowurl", "dataurl", "lowdataurl"):
+        ET.SubElement(appmsg, empty_tag).text = ""
+    attach = ET.SubElement(appmsg, "appattach")
+    ET.SubElement(attach, "totallen").text = str(size_bytes)
+    ET.SubElement(attach, "attachid").text = f"@cdn_{fileid}_{aeskey}_1"
+    ET.SubElement(attach, "cdnattachurl").text = fileid
+    ET.SubElement(attach, "aeskey").text = aeskey
+    ET.SubElement(attach, "encryver").text = "0"
+    ET.SubElement(attach, "fileext").text = fileext
+    for empty_tag in ("extinfo", "sourceusername", "sourcedisplayname", "thumburl"):
+        ET.SubElement(appmsg, empty_tag).text = ""
+    ET.SubElement(appmsg, "md5").text = md5_hex
+    ET.SubElement(appmsg, "statextstr").text = ""
+    return ET.tostring(appmsg, encoding="unicode")
+
+
 class HookGateway:
-    capabilities = frozenset({"text", "image", "quote", "contacts", "image_fetch",
-                              "image_decode", "voice", "latest_event_recovery"})
+    capabilities = frozenset({"text", "image", "file", "quote", "contacts", "image_fetch",
+                              "file_fetch", "image_decode", "voice", "latest_event_recovery"})
     archive_envelope = staticmethod(archive_envelope)
 
     def __init__(self, config: GatewayConfig):
@@ -96,6 +133,88 @@ class HookGateway:
         if response["ret"] == 0 and response.get("queued") is True:
             return "queued", "hook_queued_not_delivery_proof"
         return "unknown", f"unclassified_hook_ret_{response['ret']}"
+
+    def send_file(self, conversation_id: str, path: Path) -> tuple[str, str | None]:
+        path_str = str(path)
+        if not conversation_id or "\0" in conversation_id or "\0" in path_str:
+            return "rejected", "invalid_file_send_arguments"
+        try:
+            if not path.is_file():
+                return "rejected", "send_file_not_found"
+            size = path.stat().st_size
+        except OSError:
+            return "rejected", "send_file_unreadable"
+        if size <= 0 or size > MAX_FILE_BYTES:
+            return "rejected", "send_file_size_out_of_range"
+
+        self._pacer.wait_turn()
+        try:
+            with httpx.Client(timeout=60, trust_env=False, follow_redirects=False,
+                              transport=self.transport) as hook:
+                raw = hook.post(self.base_url + "/SendFileMsg", json={
+                    "to_wxid": conversation_id,
+                    "file_path": path_str,
+                })
+        except httpx.HTTPError:
+            return "unknown", "hook_transport_or_response_error_delivery_may_have_occurred"
+
+        if raw.status_code == 404:
+            return self._send_file_via_native_upload(conversation_id, path)
+        if raw.status_code != 200 or len(raw.content) > 4096:
+            return "unknown", f"hook_http_status_{raw.status_code}"
+        try:
+            response = raw.json()
+        except ValueError:
+            return "unknown", "hook_response_invalid_json"
+        if not isinstance(response, dict) or type(response.get("ret")) is not int:
+            return "unknown", "hook_response_missing_integer_ret"
+        if response["ret"] == 0:
+            return "accepted_by_server", "hook_file_send_accepted"
+        if response["ret"] == -5 and self.image_source.native_downloader is not None:
+            return self._send_file_via_native_upload(conversation_id, path)
+        if response["ret"] in (-1, -2):
+            return "rejected", f"hook_pre_send_rejection_ret_{response['ret']}"
+        return "unknown", f"unclassified_hook_ret_{response['ret']}"
+
+    def _send_file_via_native_upload(
+        self,
+        conversation_id: str,
+        path: Path,
+    ) -> tuple[str, str | None]:
+        downloader = self.image_source.native_downloader
+        account_id = self.config.account_id
+        if downloader is None or not account_id:
+            return "rejected", "file_send_endpoint_unavailable"
+        uploaded = downloader.upload_file(account_id, path)
+        if uploaded is None:
+            return "unknown", "native_file_upload_failed"
+        fileid, aeskey, md5_hex, size_bytes = uploaded
+        xml = _build_file_appmsg_xml(
+            title=path.name,
+            fileext=path.suffix.lstrip(".").lower(),
+            size_bytes=size_bytes,
+            md5_hex=md5_hex,
+            fileid=fileid,
+            aeskey=aeskey,
+        )
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10, trust_env=False,
+                              follow_redirects=False, transport=self.transport) as hook:
+                raw = hook.post("/ForwardXMLMsg", json={
+                    "to_wxid": conversation_id, "type": 6, "content": xml,
+                })
+            result = raw.json() if len(raw.content) <= 4096 else None
+            if raw.status_code != 200:
+                return "unknown", f"hook_http_status_{raw.status_code}"
+            if not isinstance(result, dict) or type(result.get("ret")) is not int:
+                return "unknown", "hook_response_missing_integer_ret"
+            if result["ret"] == 0:
+                return "accepted_by_server", "native_upload_and_forward_accepted"
+            if result["ret"] in (-1, -2):
+                return "rejected", f"hook_pre_send_rejection_ret_{result['ret']}"
+            return "unknown", f"unclassified_hook_ret_{result['ret']}"
+        except (httpx.HTTPError, ValueError):
+            return "unknown", "hook_transport_or_response_error_delivery_may_have_occurred"
 
     def send_quote(self, conversation_id: str, text: str,
                    quote: tuple[str, str, str, str]) -> tuple[str, str | None]:
@@ -192,6 +311,14 @@ class HookGateway:
 
     def fetch_thumbnail(self, item, references, destination):
         return self.image_source._fetch_unique_thumbnail(item, references, destination)
+
+    def fetch_received_file(
+        self,
+        item: MessageEvent,
+        references: list[dict[str, str]],
+        destination: Path,
+    ) -> tuple[str, int]:
+        return self.image_source.fetch_received_file(item, references, destination)
 
     def voice_payload(self, item: MessageEvent) -> VoicePayload:
         source = json.loads(item.raw_message_json) if item.raw_message_json else {}

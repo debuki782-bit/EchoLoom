@@ -285,6 +285,7 @@ def test_business_modules_do_not_embed_hook_endpoints():
         for name in (
             "wechat_tools.py",
             "media.py",
+            "file_reader.py",
             "pilot.py",
             "context_assembler.py",
             "ingress.py",
@@ -307,5 +308,14 @@ def test_business_modules_do_not_embed_hook_endpoints():
     module_paths.extend(toolset_paths)
     for path in module_paths:
         source = path.read_text("utf-8")
-        for endpoint in ("/SendTextMsg", "/SendImgMsg", "/ForwardXMLMsg", "/Decode_Pic", "/QueryDB/status"):
+        for endpoint in (
+            "/SendTextMsg",
+            "/SendImgMsg",
+            "/SendFileMsg",
+            "/ForwardXMLMsg",
+            "/Decode_Pic",
+            "/Download_File",
+            "/Upload_File",
+            "/QueryDB/status",
+        ):
             assert endpoint not in source, (path.relative_to(root).as_posix(), endpoint)

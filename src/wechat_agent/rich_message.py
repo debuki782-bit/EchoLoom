@@ -15,6 +15,9 @@ _IMAGE_REFERENCE_FIELDS = (
     "newmd5", "rawmd5", "length", "hdlength",
     "cdnthumblength", "cdnthumbwidth", "cdnthumbheight",
 )
+_FILE_MD5 = re.compile(r"^[0-9a-fA-F]{32}$")
+_CDN_ATTACH_ID = re.compile(r"^@cdn_([0-9a-fA-F]{40,4096})_([0-9a-fA-F]{32})_\d+$")
+_MAX_FILE_BYTES = 200_000_000
 _XML_TAG = re.compile(r"<(?P<tag>[\w:.-]+)(?P<attrs>[^<>]*?)(?:/?)>", re.DOTALL)
 _XML_ATTR = re.compile(
     r"(?P<name>[\w:.-]+)\s*=\s*(?:\"(?P<dq>[^\"]*)\"|'(?P<sq>[^']*)')",
@@ -73,6 +76,10 @@ def normalize_message(item: MessageEvent) -> MessageEvent | None:
     app = root.find(".//appmsg")
     if app is None:
         return None
+    app_type = (app.findtext("type") or "").strip()
+    ref = app.find("refermsg")
+    if app_type in ("6", "74") and ref is None:
+        return _normalize_file_app_message(item, app, app_type)
     app_result: dict[str, object] = {"kind": "app_message", "app_type": app.findtext("type"),
               "text": (app.findtext("title") or "")[:8192]}
     # Shared cards carry their destination separately from the visible title.
@@ -88,7 +95,6 @@ def normalize_message(item: MessageEvent) -> MessageEvent | None:
     description = (app.findtext("des") or "").strip()
     if description:
         app_result["description"] = description[:8192]
-    ref = app.find("refermsg")
     if ref is not None:
         from_user = (ref.findtext("fromusr") or "")[:512]
         chat_user = (ref.findtext("chatusr") or "")[:512]
@@ -215,3 +221,141 @@ def _platform_message_id(value: str | None) -> str | None:
     if not value.isdecimal() or len(value) > 32 or not value.strip("0"):
         return None
     return value
+
+
+def _normalize_file_app_message(item: MessageEvent, app: ET.Element, app_type: str) -> MessageEvent:
+    attach = app.find("appattach")
+    title = (app.findtext("title") or "").replace("\0", "").replace("\r", " ").replace("\n", " ").strip()[:512]
+    ext = ((attach.findtext("fileext") if attach is not None else "") or "").strip().lstrip(".").casefold()[:32]
+    if not ext and "." in title:
+        ext = title.rsplit(".", 1)[-1].strip().casefold()[:32]
+    totallen_raw = ((attach.findtext("totallen") if attach is not None else "") or "").strip()
+    size_bytes: int | None = None
+    if totallen_raw.isdigit():
+        parsed_len = int(totallen_raw)
+        if 0 <= parsed_len <= _MAX_FILE_BYTES:
+            size_bytes = parsed_len
+
+    if app_type == "74":
+        payload: dict[str, object] = {
+            "kind": "file_upload_notice",
+            "app_type": "74",
+            "text": title,
+            "filename": title,
+            "fileext": ext,
+        }
+        if size_bytes is not None:
+            payload["size_bytes"] = size_bytes
+        return replace(
+            item,
+            message_type=1,
+            text=json.dumps(payload, ensure_ascii=False),
+            original_message_type=item.original_message_type or item.message_type,
+        )
+
+    md5_raw = (app.findtext("md5") or (attach.findtext("md5") if attach is not None else "") or "").strip().lower()
+    refs = extract_file_references(item.text, item.sender_id if item.is_group else None)
+    file_result: dict[str, object] = {
+        "kind": "file_message",
+        "app_type": "6",
+        "text": title,
+        "filename": title,
+        "fileext": ext,
+        "file_references": refs,
+    }
+    if size_bytes is not None:
+        file_result["size_bytes"] = size_bytes
+    if _FILE_MD5.fullmatch(md5_raw):
+        file_result["md5"] = md5_raw
+    return replace(
+        item,
+        message_type=1,
+        text=json.dumps(file_result, ensure_ascii=False),
+        original_message_type=item.original_message_type or item.message_type,
+    )
+
+
+def extract_file_references(body: str, sender_id: str | None = None) -> list[dict[str, str]]:
+    """Extract WeChat file-attachment download fields from <msg><appmsg> XML safely."""
+    if sender_id and body.startswith(sender_id + ":\n"):
+        body = body[len(sender_id) + 2:]
+    start = body.find("<msg")
+    if start < 0 or len(body) > 65536 or "<!DOCTYPE" in body.upper():
+        return []
+    try:
+        root = ET.fromstring(body[start:])
+    except ET.ParseError:
+        return []
+    app = root.find(".//appmsg")
+    if app is None:
+        return []
+    attach = app.find("appattach")
+    raw_pairs: list[tuple[str, str]] = []
+    title = (app.findtext("title") or "").replace("\0", "").strip()
+    if title:
+        raw_pairs.append(("title", title[:512]))
+    if attach is not None:
+        for field in ("cdnattachurl", "aeskey", "attachid", "totallen", "fileext", "md5"):
+            val = (attach.findtext(field) or "").strip()
+            if val:
+                raw_pairs.append((field, val[:4096]))
+    md5_top = (app.findtext("md5") or "").strip()
+    if md5_top:
+        raw_pairs.append(("md5", md5_top.lower()[:64]))
+
+    values = dict(raw_pairs)
+    attachid = values.get("attachid", "")
+    if attachid and (not values.get("cdnattachurl") or not values.get("aeskey")):
+        matched = _CDN_ATTACH_ID.fullmatch(attachid)
+        if matched:
+            if not values.get("cdnattachurl"):
+                raw_pairs.append(("cdnattachurl", matched.group(1)))
+            if not values.get("aeskey"):
+                raw_pairs.append(("aeskey", matched.group(2).lower()))
+
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict[str, str]] = []
+    for field, value in raw_pairs:
+        key = (field, value)
+        if key not in seen:
+            seen.add(key)
+            unique.append({"field": field, "value": value})
+    return unique
+
+
+def normalized_file_references(normalized_text: str) -> tuple[dict[str, str], ...]:
+    try:
+        message = json.loads(normalized_text)
+    except (json.JSONDecodeError, TypeError):
+        return ()
+    if not isinstance(message, dict) or message.get("kind") != "file_message":
+        return ()
+    refs = message.get("file_references")
+    if not isinstance(refs, list):
+        return ()
+    return tuple(
+        {"field": ref["field"], "value": ref["value"]}
+        for ref in refs
+        if isinstance(ref, dict) and isinstance(ref.get("field"), str)
+        and isinstance(ref.get("value"), str)
+    )
+
+
+def normalized_file_metadata(normalized_text: str) -> dict[str, object] | None:
+    """Return safe public metadata (never CDN/AES credentials) for a file message."""
+    try:
+        message = json.loads(normalized_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(message, dict) or message.get("kind") not in ("file_message", "file_upload_notice"):
+        return None
+    meta: dict[str, object] = {
+        "kind": str(message["kind"]),
+        "filename": str(message.get("filename") or message.get("text") or ""),
+        "fileext": str(message.get("fileext") or ""),
+    }
+    if isinstance(message.get("size_bytes"), int):
+        meta["size_bytes"] = message["size_bytes"]
+    if isinstance(message.get("md5"), str) and _FILE_MD5.fullmatch(message["md5"]):
+        meta["md5"] = message["md5"].lower()
+    return meta

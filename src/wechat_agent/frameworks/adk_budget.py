@@ -1,11 +1,12 @@
 """Per-call cost, token, and image-sub-budget boundary for ADK models."""
 
-from collections import OrderedDict
 import asyncio
 import hashlib
 import inspect
 import json
 import logging
+from collections import OrderedDict
+from collections.abc import Callable
 from uuid import uuid4
 
 import google.genai._common as genai_common
@@ -13,6 +14,7 @@ import google.genai.models as genai_models
 import httpx
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from pydantic import PrivateAttr
 
@@ -190,6 +192,34 @@ def _is_counter_transport_error(exc: BaseException, status: int | None) -> bool:
     )
 
 
+def _serialized_request_bytes(request: LlmRequest) -> int:
+    """Measure JSON payload bytes without failing on Python class response schemas."""
+    config = getattr(request, "config", None)
+    schema_obj = getattr(config, "response_schema", None) if config is not None else None
+    if schema_obj is None:
+        return len(request.model_dump_json(exclude={"tools_dict"}).encode())
+    base_bytes = len(
+        request.model_dump_json(exclude={"tools_dict": True, "config": {"response_schema": True}}).encode()
+    )
+    if hasattr(schema_obj, "model_dump_json") and not isinstance(schema_obj, type):
+        schema_bytes = len(schema_obj.model_dump_json().encode())
+    else:
+        schema_payload = (
+            schema_obj.model_json_schema()
+            if hasattr(schema_obj, "model_json_schema")
+            else str(schema_obj)
+        )
+        schema_bytes = len(
+            json.dumps(
+                schema_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        )
+    return base_bytes + schema_bytes
+
+
 def _count_tokens_config(request: LlmRequest) -> types.CountTokensConfig | None:
     """Extract system_instruction, tools, and structured output schema for official countTokens."""
     config = getattr(request, "config", None)
@@ -347,6 +377,8 @@ class BudgetedAdkModel(BaseLlm):
     _token_counter: object | None = PrivateAttr(default=None)
     _token_count_cache: OrderedDict[str, int] = PrivateAttr(default_factory=OrderedDict)
     _http_timeout_ms: int = PrivateAttr(default=20_000)
+    _use_streaming: bool = PrivateAttr(default=False)
+    _on_indeterminate: object | None = PrivateAttr(default=None)
     _budget_scope_id: str = PrivateAttr(default="default")
     _scope_budget: int = PrivateAttr(default=DAILY_ACCOUNT_BUDGET_MICROUSD)
     _text_budget: int = PrivateAttr(default=TEXT_MODEL_DAILY_BUDGET_MICROUSD)
@@ -367,6 +399,8 @@ class BudgetedAdkModel(BaseLlm):
         max_output_tokens: int | None = None,
         token_counter=None,
         http_timeout_ms: int = 20_000,
+        use_streaming: bool = False,
+        on_indeterminate: Callable[[], object] | None = None,
         budget_scope_id: str = "default",
         scope_budget_microusd: int = DAILY_ACCOUNT_BUDGET_MICROUSD,
         text_budget_microusd: int = TEXT_MODEL_DAILY_BUDGET_MICROUSD,
@@ -432,6 +466,8 @@ class BudgetedAdkModel(BaseLlm):
         self._active_compression_tokens = resolved_active_tokens
         self._token_counter = token_counter
         self._http_timeout_ms = http_timeout_ms
+        self._use_streaming = bool(use_streaming)
+        self._on_indeterminate = on_indeterminate
         self._budget_scope_id = budget_scope_id
         self._scope_budget = scope_budget_microusd
         self._text_budget = text_budget_microusd
@@ -439,6 +475,45 @@ class BudgetedAdkModel(BaseLlm):
         self._image_generation_budget = image_generation_budget_microusd
         self._account_text_budget = account_text_budget_microusd
         self._account_image_read_budget = account_image_read_budget_microusd
+
+    @staticmethod
+    def _merge_stream_responses(responses: list[LlmResponse]) -> LlmResponse:
+        """Merge aggregated non-partial streaming responses into one atomic response."""
+        if len(responses) == 1:
+            return responses[0]
+        parts: list[types.Part] = []
+        usage_metadata = None
+        grounding_metadata = None
+        citation_metadata = None
+        for resp in responses:
+            content = getattr(resp, "content", None)
+            if content is not None and getattr(content, "parts", None):
+                parts.extend(content.parts)
+            if getattr(resp, "usage_metadata", None) is not None:
+                usage_metadata = resp.usage_metadata
+            if getattr(resp, "grounding_metadata", None) is not None:
+                grounding_metadata = resp.grounding_metadata
+            if getattr(resp, "citation_metadata", None) is not None:
+                citation_metadata = resp.citation_metadata
+        last = responses[-1]
+        merged = last.model_copy(deep=True)
+        merged.content = types.Content(role="model", parts=parts) if parts else last.content
+        merged.usage_metadata = usage_metadata
+        merged.grounding_metadata = grounding_metadata
+        merged.citation_metadata = citation_metadata
+        return merged
+
+    def _notify_indeterminate(self) -> None:
+        callback = self._on_indeterminate
+        if not callable(callback):
+            return
+        try:
+            callback()
+        except Exception as exc:  # noqa: BLE001 - client refresh must stay best-effort
+            logger.warning(
+                "event=adk_indeterminate_callback_failed error_type=%s",
+                type(exc).__name__,
+            )
 
     @property
     def supports_token_counting(self) -> bool:
@@ -622,9 +697,7 @@ class BudgetedAdkModel(BaseLlm):
                 len((getattr(part, "text", None) or "").encode("utf-8"))
                 for part in all_parts
             )
-            serialized_bytes = len(
-                current.model_dump_json(exclude={"tools_dict"}).encode()
-            )
+            serialized_bytes = _serialized_request_bytes(current)
             return all_parts, bool(images), unsupported, text_bytes, serialized_bytes
 
         async def count_tokens(current: LlmRequest) -> int | None:
@@ -784,14 +857,26 @@ class BudgetedAdkModel(BaseLlm):
                 )
             raise RuntimeError(f"ADK usage reservation refused: {reserved.status}")
         response = None
+        saw_partial = False
         try:
-            async with asyncio.timeout(self._http_timeout_ms / 1000 + 5):
-                async for item in self._delegate.generate_content_async(request, stream=False):
-                    if response is not None or item.partial:
-                        raise ValueError("unexpected partial or multiple responses")
-                    response = item
+            timeout_seconds = self._http_timeout_ms / 1000 + (30 if self._use_streaming else 5)
+            async with asyncio.timeout(timeout_seconds):
+                if self._use_streaming:
+                    finals = []
+                    async for item in self._delegate.generate_content_async(request, stream=True):
+                        if getattr(item, "partial", False):
+                            saw_partial = True
+                            continue
+                        finals.append(item)
+                    if finals:
+                        response = self._merge_stream_responses(finals)
+                else:
+                    async for item in self._delegate.generate_content_async(request, stream=False):
+                        if response is not None or item.partial:
+                            raise ValueError("unexpected partial or multiple responses")
+                        response = item
         except Exception as exc:  # noqa: BLE001 - post-call failures retain the reservation
-            if response is None and _is_pre_dispatch_connect_error(exc):
+            if response is None and not saw_partial and _is_pre_dispatch_connect_error(exc):
                 self._usage.release(request_id)
                 logger.warning(
                     "event=adk_provider_unavailable model=%s error_type=%s reservation_released=true",
@@ -801,8 +886,8 @@ class BudgetedAdkModel(BaseLlm):
                 raise ModelProviderUnavailable(
                     "ADK provider unreachable before dispatch; reservation released"
                 ) from None
-            status = _http_status_code(exc) if response is None else None
-            if response is None and _is_provider_circuit_status(status):
+            status = _http_status_code(exc) if (response is None and not saw_partial) else None
+            if response is None and not saw_partial and _is_provider_circuit_status(status):
                 self._usage.release(request_id)
                 logger.warning(
                     "event=adk_provider_rejected model=%s error_type=%s status_code=%s "
@@ -814,7 +899,7 @@ class BudgetedAdkModel(BaseLlm):
                 raise ModelProviderUnavailable(
                     f"ADK provider rejected request (HTTP {status}); reservation released"
                 ) from None
-            if response is None and _is_unbilled_reject_status(status):
+            if response is None and not saw_partial and _is_unbilled_reject_status(status):
                 self._usage.release(request_id)
                 logger.warning(
                     "event=adk_request_rejected model=%s error_type=%s status_code=%s "
@@ -826,6 +911,18 @@ class BudgetedAdkModel(BaseLlm):
                 raise ModelCallIndeterminate(
                     f"ADK request rejected (HTTP {status}); reservation released"
                 ) from None
+            logger.warning(
+                "event=adk_call_indeterminate model=%s feature=%s error_type=%s status_code=%s "
+                "had_response=%s saw_partial=%s reservation_retained=true request_id=%s",
+                self.model,
+                feature,
+                type(exc).__name__,
+                status,
+                response is not None,
+                saw_partial,
+                request_id,
+            )
+            self._notify_indeterminate()
             raise ModelCallIndeterminate("ADK result unknown; reservation retained") from None
         metadata = response.usage_metadata if response else None
         if (
@@ -833,9 +930,25 @@ class BudgetedAdkModel(BaseLlm):
             or metadata.prompt_token_count is None
             or metadata.total_token_count is None
         ):
+            logger.warning(
+                "event=adk_call_indeterminate model=%s feature=%s reason=missing_usage "
+                "had_response=%s saw_partial=%s reservation_retained=true request_id=%s",
+                self.model,
+                feature,
+                response is not None,
+                saw_partial,
+                request_id,
+            )
             raise ModelCallIndeterminate("ADK usage missing; reservation retained")
         prompt, total = metadata.prompt_token_count, metadata.total_token_count
         if prompt < 0 or total < prompt:
+            logger.warning(
+                "event=adk_call_indeterminate model=%s feature=%s reason=invalid_usage "
+                "reservation_retained=true request_id=%s",
+                self.model,
+                feature,
+                request_id,
+            )
             raise ModelCallIndeterminate("ADK usage invalid; reservation retained")
         cached_tokens = int(getattr(metadata, "cached_content_token_count", 0) or 0)
         cache_write_tokens = int(
@@ -853,6 +966,13 @@ class BudgetedAdkModel(BaseLlm):
             cache_write_tokens = 0
         tool_input = int(getattr(metadata, "tool_use_prompt_token_count", 0) or 0)
         if tool_input < 0 or total < prompt + tool_input:
+            logger.warning(
+                "event=adk_call_indeterminate model=%s feature=%s reason=invalid_tool_usage "
+                "reservation_retained=true request_id=%s",
+                self.model,
+                feature,
+                request_id,
+            )
             raise ModelCallIndeterminate("ADK tool input usage invalid; reservation retained")
         search_queries = len(getattr(response.grounding_metadata, "web_search_queries", None) or [])
         actual = _microusd_with_cached_input(
@@ -868,5 +988,13 @@ class BudgetedAdkModel(BaseLlm):
         if state == "over_reservation":
             logger.warning("event=adk_usage_over_reservation actual_microusd=%s", actual)
         elif state != "settled":
+            logger.warning(
+                "event=adk_call_indeterminate model=%s feature=%s reason=settle_state_%s "
+                "reservation_retained=true request_id=%s",
+                self.model,
+                feature,
+                state,
+                request_id,
+            )
             raise ModelCallIndeterminate("ADK usage exceeded reservation or settlement failed")
         yield response

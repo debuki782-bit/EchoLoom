@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from wechat_agent import tool_policy
 from wechat_agent.tool_timing import adk_function_tool
-from wechat_agent.toolsets import MediaToolset, MemoryToolset, ReplyToolset
+from wechat_agent.toolsets import MediaToolset, MemoryToolset, ReplyToolset, WorkspaceToolset
 from wechat_agent.trace_dashboard import _tool_names, _transcript, create_trace_dashboard
 from wechat_agent.wechat_tools import WeChatTools
 
@@ -85,8 +85,10 @@ def test_overview_lists_all_11_wechat_tools_via_static_tool_names(tmp_path, monk
         | set(MediaToolset.TOOL_NAMES)
         | set(MemoryToolset.TOOL_NAMES)
     )
-    assert len(expected_wechat_tools) == 11
+    assert len(expected_wechat_tools) == 13
     assert expected_wechat_tools == set(WeChatTools.TOOL_NAMES)
+    expected_workspace_tools = set(WorkspaceToolset.TOOL_NAMES)
+    assert len(expected_workspace_tools) == 4
 
     class StaticOnlyToolset:
         TOOL_NAMES = ("alpha_tool", "beta_tool")
@@ -106,6 +108,7 @@ def test_overview_lists_all_11_wechat_tools_via_static_tool_names(tmp_path, monk
         overview = client.get("/api/overview").json()
         by_name = {item["name"]: item for item in overview["tools"]}
         assert expected_wechat_tools.issubset(by_name)
+        assert expected_workspace_tools.issubset(by_name)
         for name in expected_wechat_tools:
             assert by_name[name]["main"] is True
             assert by_name[name]["idle"] is True

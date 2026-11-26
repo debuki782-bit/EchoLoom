@@ -176,6 +176,10 @@ class EpisodeMemory:
                     val = str(parsed.get(key) or "").strip()
                     if val:
                         parts.append(val)
+            elif kind == "file_message":
+                name = str(parsed.get("filename") or parsed.get("text") or "").strip()
+                if name:
+                    parts.append(name)
             elif kind == "pat_message":
                 suffix = str(parsed.get("suffix") or "").strip()
                 if suffix:
@@ -193,6 +197,10 @@ class EpisodeMemory:
                 transcript = str(item.audio_metadata.get("transcript") or "").strip()
                 if transcript:
                     parts.append(transcript[:250])
+            if item.file_metadata:
+                summary = str(item.file_metadata.get("summary") or "").strip()
+                if summary:
+                    parts.append(summary[:250])
         return "\n".join(parts).strip()
 
     @staticmethod

@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 MAX_BYTES = 200_000_000
 MD5 = re.compile(r"[0-9a-fA-F]{32}")
+HEX32 = re.compile(r"[0-9a-fA-F]{32}")
+_CDN_ATTACH_ID = re.compile(r"^@cdn_([0-9a-fA-F]{40,4096})_([0-9a-fA-F]{32})_\d+$")
 SUPPORTED_WEIXIN_DLL_SHA256 = "f487e4f56930456a25fb0d7b058c77e2dcd364e268d49bdfff4dc0e3be26ba36"
 
 
@@ -321,6 +323,65 @@ def download_spec(account_id: str, references: list[dict[str, str]]) -> dict | N
     return spec
 
 
+def file_download_spec(account_id: str, references: list[dict[str, str]]) -> dict | None:
+    """Build deterministic C2C file-download request matching :30002 validation."""
+    values = {r.get("field"): r.get("value", "") for r in references}
+    fileid = values.get("cdnattachurl", "").strip()
+    aeskey = values.get("aeskey", "").strip().lower()
+    attachid = values.get("attachid", "").strip()
+    if (not fileid or not aeskey) and attachid:
+        matched = _CDN_ATTACH_ID.fullmatch(attachid)
+        if matched:
+            fileid = fileid or matched.group(1)
+            aeskey = aeskey or matched.group(2).lower()
+    digest = values.get("md5", "").strip().lower()
+    length = values.get("totallen", "").strip()
+    if (not account_id or not fileid or len(fileid) > 4096
+            or "://" in fileid or "\0" in fileid
+            or not HEX32.fullmatch(aeskey)
+            or not MD5.fullmatch(digest)
+            or not length.isdigit()):
+        return None
+    expected_bytes = int(length)
+    if not 0 < expected_bytes <= MAX_BYTES:
+        return None
+    file_type = 7 if expected_bytes > 25 * 1024 * 1024 else 5
+    spec = {
+        "account_id": account_id,
+        "fileid": fileid,
+        "aeskey": aeskey,
+        "file_type": file_type,
+        "expected_md5": digest,
+        "expected_bytes": expected_bytes,
+    }
+    spec["job_id"] = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+    return spec
+
+
+def file_upload_spec(
+    account_id: str,
+    file_path: Path,
+    expected_md5: str,
+    byte_count: int,
+) -> dict | None:
+    """Build deterministic C2C file-upload request matching :30002 validation."""
+    path_str = str(file_path)
+    if (not account_id or not path_str or len(path_str) > 4096 or "\0" in path_str
+            or not MD5.fullmatch(expected_md5)
+            or not 0 < int(byte_count) <= MAX_BYTES):
+        return None
+    file_type = 7 if int(byte_count) > 25 * 1024 * 1024 else 5
+    spec = {
+        "account_id": account_id,
+        "file_path": path_str,
+        "expected_md5": expected_md5.lower(),
+        "expected_bytes": int(byte_count),
+        "file_type": file_type,
+    }
+    spec["job_id"] = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+    return spec
+
+
 class NativeImageDownloader:
     def __init__(
         self,
@@ -337,6 +398,7 @@ class NativeImageDownloader:
         self.url, _ = _validate_loopback_http_url(url, "native image download URL")
         self.hook_url, self._hook_port = _validate_loopback_http_url(hook_url, "Hook URL")
         self.output_root = (self.workspace / "data/native-image-downloads").resolve()
+        self.file_output_root = (self.workspace / "data/native-file-downloads").resolve()
         self.transport = transport
         self.auto_start = bool(auto_start and transport is None)
         self._service_launcher = service_launcher
@@ -387,89 +449,212 @@ class NativeImageDownloader:
                 self._last_failed_launch_monotonic = time.monotonic()
             return started
 
-    def _post_and_poll(self, client: httpx.Client, spec: dict) -> dict | None:
-        response = client.post(self.url + "/Download_Image", json=spec)
+    def _post_and_poll(
+        self,
+        client: httpx.Client,
+        spec: dict,
+        *,
+        post_path: str = "/Download_Image",
+        poll_prefix: str = "/Download_Image/",
+        max_wait_seconds: float = 38.0,
+    ) -> dict | None:
+        response = client.post(self.url + post_path, json=spec)
         if response.status_code != 200:
             logger.warning(
-                "event=native_image_download_http_error status=%s", response.status_code,
+                "event=native_transfer_http_error path=%s status=%s",
+                post_path, response.status_code,
             )
             return None
         result = response.json()
-        deadline = time.monotonic() + 38
+        deadline = time.monotonic() + max_wait_seconds
         while result.get("state") in ("queued", "submitted") and time.monotonic() < deadline:
             time.sleep(0.2)
-            response = client.get(self.url + "/Download_Image/" + spec["job_id"])
+            response = client.get(self.url + poll_prefix + spec["job_id"])
             if response.status_code != 200:
                 logger.warning(
-                    "event=native_image_download_poll_http_error status=%s",
-                    response.status_code,
+                    "event=native_transfer_poll_http_error path=%s status=%s",
+                    poll_prefix, response.status_code,
                 )
                 return None
             result = response.json()
         return result if isinstance(result, dict) else None
+
+    def _submit_job(
+        self,
+        account_id: str,
+        spec: dict,
+        *,
+        post_path: str,
+        poll_prefix: str,
+        max_wait_seconds: float = 38.0,
+    ) -> dict | None:
+        with httpx.Client(timeout=3, trust_env=False, follow_redirects=False,
+                          transport=self.transport) as client:
+            try:
+                return self._post_and_poll(
+                    client,
+                    spec,
+                    post_path=post_path,
+                    poll_prefix=poll_prefix,
+                    max_wait_seconds=max_wait_seconds,
+                )
+            except httpx.ConnectError:
+                if (self.auto_start or self._service_launcher is not None) and self.ensure_running(
+                    account_id,
+                ):
+                    return self._post_and_poll(
+                        client,
+                        spec,
+                        post_path=post_path,
+                        poll_prefix=poll_prefix,
+                        max_wait_seconds=max_wait_seconds,
+                    )
+                logger.warning(
+                    "event=native_image_download_unreachable url=%s", self.url,
+                )
+                return None
 
     def fetch(self, account_id: str, references: list[dict[str, str]], destination: Path) -> bool:
         spec = download_spec(account_id, references)
         if spec is None:
             return False
         try:
-            with httpx.Client(timeout=3, trust_env=False, follow_redirects=False,
-                              transport=self.transport) as client:
-                try:
-                    result = self._post_and_poll(client, spec)
-                except httpx.ConnectError:
-                    if (self.auto_start or self._service_launcher is not None) and self.ensure_running(
-                        account_id,
-                    ):
-                        result = self._post_and_poll(client, spec)
-                    else:
-                        logger.warning(
-                            "event=native_image_download_unreachable url=%s", self.url,
-                        )
-                        return False
-                if result is None:
-                    return False
-                # A timed-out/restarted native task must never be resubmitted,
-                # but its eventual file can still be used after exact hashing.
-                if (
-                    result.get("state") not in ("ready", "unknown")
-                    or result.get("job_id") != spec["job_id"]
-                ):
-                    logger.warning(
-                        "event=native_image_download_not_ready state=%s reason=%s",
-                        result.get("state"),
-                        result.get("reason", ""),
-                    )
-                    return False
-                # Resolve our own deterministic path. Never trust a path supplied
-                # by a process answering on the local port.
-                source = (self.output_root / (spec["job_id"] + ".bin")).resolve()
-                if not source.is_relative_to(self.output_root) or not source.is_file():
-                    return False
-                if not 0 < source.stat().st_size <= MAX_BYTES:
-                    return False
-                payload = source.read_bytes()
-                exact = hashlib.md5(payload).hexdigest() == spec["expected_md5"]
-                native_bound = (
-                    result.get("state") == "ready"
-                    and result.get("verification") == "native_resource"
-                    and type(result.get("native_completion")) is int
-                    and result.get("native_completion") == 0
-                    and result.get("resource_sha256")
-                    == hashlib.sha256(spec["fileid"].encode()).hexdigest()
-                    and result.get("sha256") == hashlib.sha256(payload).hexdigest()
-                    and result.get("byte_count") == len(payload)
+            result = self._submit_job(
+                account_id,
+                spec,
+                post_path="/Download_Image",
+                poll_prefix="/Download_Image/",
+            )
+            if result is None:
+                return False
+            # A timed-out/restarted native task must never be resubmitted,
+            # but its eventual file can still be used after exact hashing.
+            if (
+                result.get("state") not in ("ready", "unknown")
+                or result.get("job_id") != spec["job_id"]
+            ):
+                logger.warning(
+                    "event=native_image_download_not_ready state=%s reason=%s",
+                    result.get("state"),
+                    result.get("reason", ""),
                 )
-                if not exact and not native_bound:
-                    logger.warning("event=native_image_download_verification_failed")
-                    return False
-                if native_bound:
-                    with Image.open(source) as image:
-                        image.verify()
-                destination.write_bytes(payload)
-                return True
+                return False
+            # Resolve our own deterministic path. Never trust a path supplied
+            # by a process answering on the local port.
+            source = (self.output_root / (spec["job_id"] + ".bin")).resolve()
+            if not source.is_relative_to(self.output_root) or not source.is_file():
+                return False
+            if not 0 < source.stat().st_size <= MAX_BYTES:
+                return False
+            payload = source.read_bytes()
+            exact = hashlib.md5(payload).hexdigest() == spec["expected_md5"]
+            native_bound = (
+                result.get("state") == "ready"
+                and result.get("verification") == "native_resource"
+                and type(result.get("native_completion")) is int
+                and result.get("native_completion") == 0
+                and result.get("resource_sha256")
+                == hashlib.sha256(spec["fileid"].encode()).hexdigest()
+                and result.get("sha256") == hashlib.sha256(payload).hexdigest()
+                and result.get("byte_count") == len(payload)
+            )
+            if not exact and not native_bound:
+                logger.warning("event=native_image_download_verification_failed")
+                return False
+            if native_bound:
+                with Image.open(source) as image:
+                    image.verify()
+            destination.write_bytes(payload)
+            return True
         except (OSError, httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
             logger.warning(
                 "event=native_image_download_failed error_type=%s", type(exc).__name__,
             )
             return False
+
+    def fetch_file(self, account_id: str, references: list[dict[str, str]], destination: Path) -> bool:
+        spec = file_download_spec(account_id, references)
+        if spec is None:
+            return False
+        try:
+            result = self._submit_job(
+                account_id,
+                spec,
+                post_path="/Download_File",
+                poll_prefix="/Download_File/",
+                max_wait_seconds=68.0,
+            )
+            if result is None:
+                return False
+            if (
+                result.get("state") not in ("ready", "unknown")
+                or result.get("job_id") != spec["job_id"]
+            ):
+                logger.warning(
+                    "event=native_file_download_not_ready state=%s reason=%s",
+                    result.get("state"),
+                    result.get("reason", ""),
+                )
+                return False
+            source = (self.file_output_root / (spec["job_id"] + ".bin")).resolve()
+            if not source.is_relative_to(self.file_output_root) or not source.is_file():
+                return False
+            size = source.stat().st_size
+            if size != spec["expected_bytes"] or not 0 < size <= MAX_BYTES:
+                return False
+            digest = hashlib.md5(usedforsecurity=False)
+            with source.open("rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    digest.update(chunk)
+            if digest.hexdigest() != spec["expected_md5"]:
+                logger.warning("event=native_file_download_md5_mismatch")
+                return False
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with source.open("rb") as src, destination.open("wb") as dst:
+                while chunk := src.read(1024 * 1024):
+                    dst.write(chunk)
+            return True
+        except (OSError, httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+            logger.warning(
+                "event=native_file_download_failed error_type=%s", type(exc).__name__,
+            )
+            return False
+
+    def upload_file(self, account_id: str, path: Path) -> tuple[str, str, str, int] | None:
+        try:
+            if not path.is_file():
+                return None
+            digest = hashlib.md5(usedforsecurity=False)
+            size = 0
+            with path.open("rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+                    if size > MAX_BYTES:
+                        return None
+            if size <= 0:
+                return None
+            expected_md5 = digest.hexdigest()
+            spec = file_upload_spec(account_id, path, expected_md5, size)
+            if spec is None:
+                return None
+            result = self._submit_job(
+                account_id,
+                spec,
+                post_path="/Upload_File",
+                poll_prefix="/Upload_File/",
+                max_wait_seconds=68.0,
+            )
+            if (not result or result.get("state") != "ready"
+                    or result.get("job_id") != spec["job_id"]):
+                return None
+            fileid = str(result.get("fileid", "")).strip()
+            aeskey = str(result.get("aeskey", "")).strip().lower()
+            if not fileid or not HEX32.fullmatch(aeskey):
+                return None
+            return fileid, aeskey, expected_md5, size
+        except (OSError, httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+            logger.warning(
+                "event=native_file_upload_failed error_type=%s", type(exc).__name__,
+            )
+            return None

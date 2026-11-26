@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from .episode_memory import EpisodeMemory
     from .event_book import EventBook
     from .idle_tools import IdleActivityToolset
-    from .media import WeChatImageIngestor, WeChatVoiceIngestor
+    from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
     from .memory_store import MemoryStore
     from .message_ingestor import MessageIngestor
     from .mock import SystemClock
@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from .storage import Repository
     from .temporal_context import DailyEnvironmentProvider
     from .time_scheduler import TimeScheduler
-    from .toolsets import MediaToolset, MemoryToolset, ReplyToolset
+    from .toolsets import MediaToolset, MemoryToolset, ReplyToolset, WorkspaceToolset
     from .web_tools import WebSearchUsage
     from .wechat_tools import WeChatTools
 
@@ -197,6 +197,7 @@ class ProviderBundle:
     make_adk_model: Callable[..., Any]
     provider_check: Callable[[], Awaitable[bool]]
     usage_ledger: Callable[[], Any]
+    refresh_gemini_clients: Callable[[], Awaitable[None]] | None = None
 
     @property
     def model_client(self) -> Any:
@@ -219,6 +220,7 @@ class ServiceBundle:
     model_overrides: ModelOverrideStore
     image_ingestor: WeChatImageIngestor
     voice_ingestor: WeChatVoiceIngestor
+    file_ingestor: WeChatFileIngestor
     daily_environment: DailyEnvironmentProvider
     message_ingestor: MessageIngestor
     context_builder: ContextBuilder
@@ -227,6 +229,7 @@ class ServiceBundle:
     cross_sessions: CrossSessionService
     cross_tools: CrossSessionToolset
     project_tools: ProjectTools
+    workspace_tools: WorkspaceToolset
     idle_tools: IdleActivityToolset
     profile_tools: Callable[[AgentProfile, Any], list[Any]]
 
@@ -459,19 +462,56 @@ def build_providers(root: Path, profile_config: AgentProfileConfig) -> ProviderB
 
     count_model_tokens._gemini_client_provider = get_model_client  # type: ignore[attr-defined]
 
+    def _collect_stale_gemini_clients() -> list[Any]:
+        stale_clients: list[Any] = []
+        for timeout_key in list(gemini_clients):
+            stale_clients.append(gemini_clients[timeout_key])
+            gemini_clients[timeout_key] = new_gemini_client(timeout_key)
+        return stale_clients
+
+    def _schedule_close_clients(stale_clients: list[Any]) -> None:
+        if not stale_clients:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _close_all() -> None:
+            for old_client in stale_clients:
+                with suppress(Exception):
+                    await old_client.aio.aclose()
+
+        loop.create_task(_close_all())
+
+    def invalidate_gemini_clients() -> None:
+        _schedule_close_clients(_collect_stale_gemini_clients())
+
+    async def refresh_gemini_clients() -> None:
+        stale_clients = _collect_stale_gemini_clients()
+        for old_client in stale_clients:
+            with suppress(Exception):
+                await old_client.aio.aclose()
+
     def make_adk_model(
         profile: AgentProfile,
         *,
-        timeout_ms: int = 60_000,
+        timeout_ms: int | None = None,
         web: bool = False,
     ):
-        if catalog.provider_for(profile.model_id) == "openai":
+        is_gemini = catalog.provider_for(profile.model_id) == "gemini"
+        resolved_timeout_ms = (
+            (90_000 if (is_gemini and not web) else 60_000)
+            if timeout_ms is None
+            else timeout_ms
+        )
+        if not is_gemini:
             if openai_client is None:
                 raise RuntimeError(f"OpenAI client required for model {profile.model_id!r}")
             delegate = OpenAIAdkModel(
                 profile.model_id,
                 openai_client,
-                timeout_seconds=timeout_ms / 1000,
+                timeout_seconds=resolved_timeout_ms / 1000,
             )
             token_counter = None
         elif web:
@@ -480,7 +520,7 @@ def build_providers(root: Path, profile_config: AgentProfileConfig) -> ProviderB
         else:
             delegate = refreshable_gemini_cls(
                 model=profile.model_id,
-                client_provider=lambda t=timeout_ms: get_gemini_client(t),
+                client_provider=lambda t=resolved_timeout_ms: get_gemini_client(t),
             )
             token_counter = count_model_tokens
         return BudgetedAdkModel(
@@ -492,7 +532,9 @@ def build_providers(root: Path, profile_config: AgentProfileConfig) -> ProviderB
             max_input_tokens=profile.input_token_limit,
             max_output_tokens=4096 if web else profile.output_token_limit,
             token_counter=token_counter,
-            http_timeout_ms=timeout_ms,
+            http_timeout_ms=resolved_timeout_ms,
+            use_streaming=(is_gemini and not web),
+            on_indeterminate=invalidate_gemini_clients if is_gemini else None,
             budget_scope_id=profile.profile_id,
             scope_budget_microusd=profile.daily_budget_microusd,
             text_budget_microusd=profile.text_budget_microusd,
@@ -541,11 +583,8 @@ def build_providers(root: Path, profile_config: AgentProfileConfig) -> ProviderB
                 "event=provider_probe_check_failed error_type=%s",
                 type(exc).__name__,
             )
-            stale_clients: list[Any] = [model_client]
+            stale_clients: list[Any] = [model_client, *_collect_stale_gemini_clients()]
             model_client = new_model_client()
-            for timeout_key in list(gemini_clients):
-                stale_clients.append(gemini_clients[timeout_key])
-                gemini_clients[timeout_key] = new_gemini_client(timeout_key)
             for old_client in stale_clients:
                 with suppress(Exception):
                     await old_client.aio.aclose()
@@ -560,6 +599,7 @@ def build_providers(root: Path, profile_config: AgentProfileConfig) -> ProviderB
         make_adk_model=make_adk_model,
         provider_check=provider_check,
         usage_ledger=usage_ledger,
+        refresh_gemini_clients=refresh_gemini_clients,
     )
 
 
@@ -580,7 +620,7 @@ def build_services(
     from .episode_memory import EpisodeMemory
     from .event_book import EventBook
     from .idle_tools import IdleActivityToolset
-    from .media import WeChatImageIngestor, WeChatVoiceIngestor
+    from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
     from .memory_store import MemoryStore
     from .message_ingestor import MessageIngestor
     from .model_overrides import ModelOverrideStore
@@ -588,6 +628,7 @@ def build_services(
     from .project_tools import ProjectTools
     from .temporal_context import DailyEnvironmentProvider
     from .time_scheduler import TimeScheduler
+    from .toolsets import WorkspaceToolset
     from .web_tools import WebSearchUsage, WebToolset
 
     workspace = Path(root)
@@ -652,6 +693,7 @@ def build_services(
         openai_client=providers.openai_client,
         gateway=gateway,
         outbound_service=outbound,
+        command_owner_ids=profile_config.command_owner_ids,
     )
 
     image_ingestor = WeChatImageIngestor(workspace, gateway=gateway)
@@ -661,6 +703,8 @@ def build_services(
     )
     tools.image_ingestor = image_ingestor
     voice_ingestor = WeChatVoiceIngestor(workspace, gateway=gateway)
+    file_ingestor = WeChatFileIngestor(workspace, gateway=gateway)
+    tools.file_ingestor = file_ingestor
     daily_environment = DailyEnvironmentProvider()
     contact_resolver = gateway.resolve_contact
 
@@ -668,6 +712,7 @@ def build_services(
         memory_store,
         image_ingestor=image_ingestor,
         voice_ingestor=voice_ingestor,
+        file_ingestor=file_ingestor,
         archive_envelope=gateway.archive_envelope,
     )
     context_builder = ContextBuilder(
@@ -681,6 +726,7 @@ def build_services(
         resolve_contact=contact_resolver,
         image_ingestor=image_ingestor,
         voice_ingestor=voice_ingestor,
+        file_ingestor=file_ingestor,
         daily_environment=daily_environment,
         max_user_bytes=profile_config.profiles[profile_config.default_profile].context_window_bytes,
         archive_envelope=gateway.archive_envelope,
@@ -696,6 +742,10 @@ def build_services(
     )
     cross_tools = CrossSessionToolset(cross_sessions, account)
     project_tools = ProjectTools(workspace)
+    workspace_tools = WorkspaceToolset(
+        workspace,
+        command_owner_ids=profile_config.command_owner_ids,
+    )
     idle_tools = IdleActivityToolset(time_scheduler)
 
     def profile_tools(profile: AgentProfile, _model: Any) -> list[Any]:
@@ -711,12 +761,13 @@ def build_services(
             "wechat": tools.agent_tools(),
             "cross_session": cross_tools.agent_tools(),
             "project": project_tools.agent_tools(),
+            "workspace": workspace_tools.agent_tools(),
             "web": web_tools,
             "status": ReadOnlyToolset(
                 AgentToolStatus(
                     mode="selfhosted_group",
                     automatic_send_enabled=True,
-                    supported_sends=("text", "image", "quoted_reply"),
+                    supported_sends=("text", "image", "file", "quoted_reply"),
                 )
             ).agent_tools(),
         }
@@ -735,6 +786,7 @@ def build_services(
         model_overrides=model_overrides,
         image_ingestor=image_ingestor,
         voice_ingestor=voice_ingestor,
+        file_ingestor=file_ingestor,
         daily_environment=daily_environment,
         message_ingestor=message_ingestor,
         context_builder=context_builder,
@@ -743,6 +795,7 @@ def build_services(
         cross_sessions=cross_sessions,
         cross_tools=cross_tools,
         project_tools=project_tools,
+        workspace_tools=workspace_tools,
         idle_tools=idle_tools,
         profile_tools=profile_tools,
     )
@@ -1233,6 +1286,7 @@ def build_runtime_bundle(
         memory_store=services.memory_store,
         image_ingestor=services.image_ingestor,
         voice_ingestor=services.voice_ingestor,
+        file_ingestor=services.file_ingestor,
         daily_environment=services.daily_environment,
         record_activity=record_session_activity,
         delivery_state=services.tools.delivery_state,
@@ -1261,6 +1315,7 @@ def build_runtime_bundle(
         registry=registry,
         archive_envelope=gateway.archive_envelope,
         provider_check=providers.provider_check,
+        on_model_indeterminate=providers.refresh_gemini_clients,
     )
 
     async def run_idle_event(event_id: str, event_number: int, model_id: str) -> None:

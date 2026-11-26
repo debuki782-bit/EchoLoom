@@ -3,12 +3,17 @@ import hashlib
 from pathlib import Path
 
 MAX_ORIGINAL_IMAGE_BYTES = 200_000_000
+MAX_FILE_BYTES = MAX_ORIGINAL_IMAGE_BYTES
 
 
 class ImageIngestError(Exception):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+class FileIngestError(ImageIngestError):
+    """Raised when an inbound or archived file transfer cannot be verified or staged."""
 
 
 

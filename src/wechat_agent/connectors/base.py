@@ -309,3 +309,25 @@ def resolve_storage_root(status: object, account_id: str) -> Path | None:
     return import_module("wechat_agent.adapters.hook_media").wechat_storage_root_from_status(
         status, account_id
     )
+
+
+def connector_send_file(gateway: object, conversation_id: str, path: Path) -> tuple[str, str | None]:
+    """Send a file through a connector supporting `send_file`."""
+    fn = getattr(gateway, "send_file", None)
+    if callable(fn):
+        return fn(conversation_id, path)
+    return "rejected", "file_send_unsupported"
+
+
+def connector_fetch_received_file(
+    gateway: object,
+    item: MessageEvent,
+    references: list[dict[str, str]],
+    destination: Path,
+) -> tuple[str, int]:
+    """Fetch a received attachment through a connector supporting `fetch_received_file`."""
+    fn = getattr(gateway, "fetch_received_file", None)
+    if callable(fn):
+        return fn(item, references, destination)
+    FileIngestError = import_module("wechat_agent.media_artifacts").FileIngestError
+    raise FileIngestError("file_fetch_unsupported")

@@ -7,7 +7,7 @@ from pathlib import Path
 from .outbound import OutboundService, _segment_pause_seconds
 from .runtime_contract import AgentTool as ToolUnion
 from .runtime_contract import ToolContext
-from .toolsets import MediaToolset, MemoryToolset, ReplyToolset
+from .toolsets import MediaToolset, MemoryToolset, ReplyToolset, WorkspaceToolset
 from .turn_scope import (
     active_conversation,
     followup_scheduler,
@@ -31,6 +31,7 @@ __all__ = [
     "MemoryToolset",
     "ReplyToolset",
     "WeChatTools",
+    "WorkspaceToolset",
     "_segment_pause_seconds",
     "active_conversation",
     "followup_scheduler",
@@ -78,6 +79,7 @@ class WeChatTools:
         openai_client=None,
         gateway=None,
         outbound_service: OutboundService | None = None,
+        command_owner_ids: frozenset[str] | set[str] = frozenset(),
     ):
         self.root = Path(root)
         self.account = account
@@ -136,6 +138,7 @@ class WeChatTools:
             openai_client=openai_client,
             memory_store=memory_store,
             event_book=event_book,
+            command_owner_ids=command_owner_ids,
             budget=budget,
             account_text_budget=account_text_budget,
             account_image_read_budget=account_image_read_budget,
@@ -199,6 +202,22 @@ class WeChatTools:
     @voice_ingestor.setter
     def voice_ingestor(self, value) -> None:
         self.media_tools.voice_ingestor = value
+
+    @property
+    def file_ingestor(self):
+        return self.media_tools.file_ingestor
+
+    @file_ingestor.setter
+    def file_ingestor(self, value) -> None:
+        self.media_tools.file_ingestor = value
+
+    @property
+    def command_owner_ids(self) -> frozenset[str]:
+        return self.media_tools.command_owner_ids
+
+    @command_owner_ids.setter
+    def command_owner_ids(self, value: frozenset[str] | set[str]) -> None:
+        self.media_tools.command_owner_ids = frozenset(value)
 
     @property
     def openai_client(self):
@@ -335,11 +354,25 @@ class WeChatTools:
     ) -> dict[str, object]:
         return await self.media_tools.read_wechat_image(image_reference, question)
 
+    async def read_wechat_file(
+        self,
+        file_reference: str = "latest",
+        question: str = "总结该文件的核心内容与关键信息。",
+        start_line: int = 1,
+        line_count: int = 150,
+    ) -> dict[str, object]:
+        return await self.media_tools.read_wechat_file(
+            file_reference, question, start_line=start_line, line_count=line_count,
+        )
+
     async def transcribe_latest_wechat_voice(self) -> dict:
         return await self.media_tools.transcribe_latest_wechat_voice()
 
     async def send_wechat_image(self, image_id: str, note: str | None = None) -> dict:
         return await self.media_tools.send_wechat_image(image_id, note=note)
+
+    async def send_wechat_file(self, path: str, filename: str | None = None) -> dict[str, object]:
+        return await self.media_tools.send_wechat_file(path, filename=filename)
 
     async def generate_and_send_wechat_image(
         self, prompt: str, note: str | None = None,

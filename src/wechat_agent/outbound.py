@@ -6,8 +6,10 @@ import hashlib
 import inspect
 import json
 import logging
+import mimetypes
 import random
 import sqlite3
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -16,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .connectors.base import connector_send_file
 from .contacts import is_contact_id, is_group_conversation
 from .context import ContextWindow
 from .models import ConversationKey, ReplyDraft
@@ -502,11 +505,11 @@ class OutboundService:
         if (send_attempt_count >= self.MAX_SEND_ATTEMPTS
                 or state.get("last_send_status") in ("queued", "accepted_by_server")):
             return None
-        if (action in ("text", "quote", "image", "generate_and_send_image")
+        if (action in ("text", "quote", "image", "generate_and_send_image", "file")
                 and failure_count >= self.MAX_SEND_ATTEMPTS):
             return None
         retry_marker = failure_count if action in (
-            "text", "quote", "image", "generate_and_send_image",
+            "text", "quote", "image", "generate_and_send_image", "file",
         ) else 0
         receipt = hashlib.sha256(
             f"{scope}\0{action}\0{retry_marker}\0{value}".encode()
@@ -516,7 +519,7 @@ class OutboundService:
                 "INSERT OR IGNORE INTO operations VALUES (?,'attempted')", (receipt,),
             )
             if cursor.rowcount and action in (
-                "text", "quote", "image", "generate_and_send_image",
+                "text", "quote", "image", "generate_and_send_image", "file",
             ):
                 scopes = tuple(dict.fromkeys((scope, *operation_receipt_ids.get())))
                 self.db.executemany(
@@ -639,6 +642,111 @@ class OutboundService:
         conversation_id: str | None = None,
     ) -> tuple[str, str | None]:
         return self.gateway.send_image(conversation_id or self.room, path)
+
+    def archive_outbound_file(
+        self,
+        path: Path,
+        *,
+        filename: str | None = None,
+        operation: str,
+        state: str,
+        account_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> dict[str, str]:
+        if not self.memory_store or state not in ("queued", "accepted_by_server", "unknown"):
+            return {}
+        account = account_id or self.account
+        conversation = conversation_id or self.room
+        source = path.resolve()
+        display_name = filename or path.name
+        if not source.is_relative_to(self.memory_store.file_root):
+            folder = self.memory_store.file_root / "sent-files"
+            folder.mkdir(parents=True, exist_ok=True)
+            copied = folder / (uuid4().hex + path.suffix.lower())
+            with source.open("rb") as src, copied.open("wb") as dst:
+                while chunk := src.read(1024 * 1024):
+                    dst.write(chunk)
+            source = copied
+        mime = mimetypes.guess_type(display_name)[0] or "application/octet-stream"
+        return self.memory_store.archive_agent_file(
+            account_id=account,
+            conversation_id=conversation,
+            artifact_path=source,
+            filename=display_name,
+            mime_type=mime,
+            operation_id=operation,
+            delivery_state=state,
+        )
+
+    def send_file_path(
+        self,
+        path: Path,
+        *,
+        conversation_id: str | None = None,
+    ) -> tuple[str, str | None]:
+        return connector_send_file(self.gateway, conversation_id or self.room, path)
+
+    async def send_file(
+        self,
+        path: Path,
+        *,
+        filename: str | None = None,
+        _record_delivery: bool = True,
+    ) -> dict[str, object]:
+        if self.is_send_blocked():
+            return self.send_block_feedback()
+        scope = operation_id.get()
+        if not scope or not self.can_send():
+            return {"status": "already_attempted_or_no_route", "delivered": False}
+        resolved = Path(path).resolve()
+        display_name = Path(filename).name if filename else resolved.name
+        receipt = self._claim("file", f"{resolved}\0{display_name}")
+        if not receipt:
+            return {"status": "already_attempted_or_no_route", "delivered": False}
+        staged_dir: tempfile.TemporaryDirectory[str] | None = None
+        send_target = resolved
+        try:
+            if display_name and display_name != resolved.name:
+                staged_dir = tempfile.TemporaryDirectory()
+                staged_path = Path(staged_dir.name) / display_name
+                with resolved.open("rb") as src, staged_path.open("wb") as dst:
+                    while chunk := src.read(1024 * 1024):
+                        dst.write(chunk)
+                send_target = staged_path
+            state, reason = await asyncio.to_thread(self.send_file_path, send_target)
+        except Exception:  # noqa: BLE001
+            state = "unknown"
+            reason = "hook_transport_exception_delivery_may_have_occurred"
+        finally:
+            if staged_dir is not None:
+                staged_dir.cleanup()
+        self.update_operation_state(receipt, state)
+        if _record_delivery:
+            self.record_send_result(scope, state, reason)
+        archived: dict[str, str] = {}
+        archive_status = (
+            "not_configured" if self.memory_store is None else
+            "not_submitted" if state not in ("queued", "accepted_by_server", "unknown") else "saved"
+        )
+        if self.memory_store is not None:
+            try:
+                archived = self.archive_outbound_file(
+                    resolved, filename=display_name, operation=receipt, state=state,
+                )
+                if not archived and state in ("queued", "accepted_by_server", "unknown"):
+                    archive_status = "failed"
+            except Exception:
+                logger.warning("event=optional_local_operation_failed", exc_info=True)
+                archive_status = "failed"
+        feedback = self.retry_feedback(state, reason)
+        return {
+            **feedback,
+            "delivered": False,
+            "filename": display_name,
+            "message_id": archived.get("message_id"),
+            "file_id": archived.get("file_id"),
+            "archive_status": archive_status,
+        }
 
     async def send_multi_segments(
         self,

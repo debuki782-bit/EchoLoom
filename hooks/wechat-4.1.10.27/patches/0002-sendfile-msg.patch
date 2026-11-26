@@ -1,0 +1,636 @@
+diff --git a/include/SendFileMsg.h b/include/SendFileMsg.h
+new file mode 100644
+index 0000000..e7471a1
+--- /dev/null
++++ b/include/SendFileMsg.h
+@@ -0,0 +1,5 @@
++#pragma once
++
++namespace httplib { class Server; }
++
++void Route_SendFileMsg(httplib::Server& svr);
+diff --git a/include/wx_send.h b/include/wx_send.h
+index 1a4b178..65740e5 100644
+--- a/include/wx_send.h
++++ b/include/wx_send.h
+@@ -22,6 +22,9 @@ namespace WeixinSend
+     // manager for the current login.  type defaults to 5 (link appmsg).
+     bool SendAppMsg(const std::string& to_wxid, const std::string& xml,
+                     uint64_t type);
++    void InstallFileCdnHooks();
++    bool SendFile(const std::string& to_wxid, const std::string& file_path,
++                  std::string& error_out);
+ 
+     // Experimental: insert a LOCAL system-tip message (e.g. the recall notice
+     // "<name> 撤回了一条消息") into the conversation `talker` via the native
+diff --git a/src/SendFileMsg.cpp b/src/SendFileMsg.cpp
+new file mode 100644
+index 0000000..5e4b77b
+--- /dev/null
++++ b/src/SendFileMsg.cpp
+@@ -0,0 +1,107 @@
++#include "httplib.h"
++#include "json.hpp"
++#include <windows.h>
++#include <filesystem>
++#include "global.h"
++#include "wx_send.h"
++#include "SendFileMsg.h"
++
++using json = nlohmann::json;
++
++namespace {
++bool Utf8ToWidePath(const std::string& utf8, std::wstring& out) {
++    if (utf8.empty() || utf8.size() > 32768 || utf8.find('\0') != std::string::npos) {
++        return false;
++    }
++    const int needed = MultiByteToWideChar(
++        CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
++    if (needed <= 0) return false;
++    out.resize(static_cast<size_t>(needed));
++    const int written = MultiByteToWideChar(
++        CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), out.data(), needed);
++    return written == needed;
++}
++}
++
++void Route_SendFileMsg(httplib::Server& svr)
++{
++    svr.Post("/SendFileMsg", [](const httplib::Request& req, httplib::Response& res)
++        {
++            json reqJson;
++            json resp;
++
++            try
++            {
++                reqJson = json::parse(req.body);
++            }
++            catch (...)
++            {
++                resp["ret"] = -1;
++                resp["msg"] = "invalid json";
++                res.set_content(resp.dump(), "application/json; charset=utf-8");
++                return;
++            }
++
++            std::string toWxid = reqJson.value("to_wxid", "");
++            if (toWxid.empty()) toWxid = reqJson.value("wxidorgid", "");
++            std::string filePath = reqJson.value("file_path", "");
++            if (filePath.empty()) filePath = reqJson.value("path", "");
++
++            res.set_header("Content-Type", "application/json; charset=utf-8");
++            if (!g_IsLogin) {
++                resp["ret"] = -2;
++                resp["msg"] = "not logged in";
++                res.set_content(resp.dump(), "application/json; charset=utf-8");
++                return;
++            }
++            if (toWxid.empty() || filePath.empty() || filePath.size() > 32768 ||
++                toWxid.find('\0') != std::string::npos || filePath.find('\0') != std::string::npos) {
++                resp["ret"] = -1;
++                resp["msg"] = "to_wxid and file_path are required";
++                res.set_content(resp.dump(), "application/json; charset=utf-8");
++                return;
++            }
++
++            std::wstring widePath;
++            std::error_code fileError;
++            if (!Utf8ToWidePath(filePath, widePath)) {
++                resp["ret"] = -1;
++                resp["msg"] = "file_path must be valid UTF-8";
++                res.set_content(resp.dump(), "application/json; charset=utf-8");
++                return;
++            }
++            const std::filesystem::path fsPath(widePath);
++            if (!std::filesystem::is_regular_file(fsPath, fileError) || fileError) {
++                resp["ret"] = -1;
++                resp["msg"] = "file_path is not a readable regular file";
++                res.set_content(resp.dump(), "application/json; charset=utf-8");
++                return;
++            }
++            const auto fileSize = std::filesystem::file_size(fsPath, fileError);
++            if (fileError || fileSize == 0 || fileSize > 200ULL * 1024ULL * 1024ULL) {
++                resp["ret"] = -1;
++                resp["msg"] = "file size out of range (1B..200MB)";
++                res.set_content(resp.dump(), "application/json; charset=utf-8");
++                return;
++            }
++
++            std::string error;
++            const bool sent = WeixinSend::SendFile(toWxid, filePath, error);
++            if (sent) {
++                resp["ret"] = 0;
++                resp["retmsg"] = "success";
++                resp["sent"] = true;
++            } else if (error == "appmsg_manager_not_ready" ||
++                       error == "cdn_callback_not_ready" ||
++                       error == "cdn_hook_not_installed") {
++                resp["ret"] = -5;
++                resp["retmsg"] = error;
++                resp["sent"] = false;
++            } else {
++                resp["ret"] = -3;
++                resp["retmsg"] = error.empty() ? "send file failed" : error;
++                resp["sent"] = false;
++            }
++            res.set_content(resp.dump(), "application/json; charset=utf-8");
++        });
++}
+diff --git a/src/http_routes.cpp b/src/http_routes.cpp
+index 537c8cb..aec1535 100644
+--- a/src/http_routes.cpp
++++ b/src/http_routes.cpp
+@@ -4,6 +4,7 @@
+ #include "GetSelfProfile.h"
+ #include "ForwardXMLMsg.h"
+ #include "SendImageMsg.h"
++#include "SendFileMsg.h"
+ #include "QueryDB.h"
+ #include "global.h"
+ #include "auto_reply.h"
+@@ -22,6 +23,7 @@ void RegisterRoutes(httplib::Server& svr)
+     RegisterGetContacts(svr);
+     Route_ForwardXMLMsg(svr);
+     Route_SendImageMsg(svr);
++    Route_SendFileMsg(svr);
+     Route_QueryDB(svr);
+ 
+     // Full auto-reply rules engine, persisted to autoreply.json.
+diff --git a/src/inline_weixin_dll_load.cpp b/src/inline_weixin_dll_load.cpp
+index 96bfc32..431b9c6 100644
+--- a/src/inline_weixin_dll_load.cpp
++++ b/src/inline_weixin_dll_load.cpp
+@@ -5862,6 +5862,7 @@ void Evt_WeixinLoad()
+     // any network action after login, so SendAppMsg has a live manager without
+     // requiring a manual card send to hit the sendappmsg-specific F120 path.
+     InstallTaskDispatchObserverHook();
++    WeixinSend::InstallFileCdnHooks();
+     // Read-only contact response parser observation.  This populates the
+     // bounded contact cache from WeChat's own response objects, so /GetContact
+     // does not need to wake or access an idle SQLite connection.
+diff --git a/src/wx_send.cpp b/src/wx_send.cpp
+index d14d35f..7c1fe4b 100644
+--- a/src/wx_send.cpp
++++ b/src/wx_send.cpp
+@@ -7,6 +7,14 @@
+ #include <cstring>
+ #include <ctime>
+ #include <objbase.h>
++#include <atomic>
++#include <cctype>
++#include <filesystem>
++#include <memory>
++#include <mutex>
++#include <unordered_map>
++#include <unordered_set>
++#include "MinHook.h"
+ #include "global.h"
+ #include "tools.h"
+ 
+@@ -1277,4 +1285,426 @@ namespace WeixinSend
+         return ok;
+     }
+ 
++
++
++    namespace FileTransfer {
++        constexpr uintptr_t kCdnMgrDlStart = 0xd84930;
++        constexpr uintptr_t kCdnMgrUlStart = 0xd84530;
++        constexpr uintptr_t kCdnUlCbCall = 0x21ad710;
++        constexpr uintptr_t kStartUpload = 0x21ab410;
++        constexpr uintptr_t kDestructUpload = 0x98b250;
++        constexpr uintptr_t kGrowString = 0x54470;
++        constexpr uintptr_t kCallbackVtable = 0x865bc38;
++        constexpr size_t kUploadRequestBytes = 0x3f0;
++
++        using CdnMgrStartFn = int(__fastcall*)(void*, void*);
++        using UploadCbCallFn = int(__fastcall*)(const void*, const void*, void*);
++        using StartUploadFn = int(__fastcall*)(void*);
++
++        struct UploadDone {
++            int code = -1;
++            std::string fileid;
++            std::string aeskey;
++            uint64_t bytes = 0;
++        };
++
++        std::mutex g_cdnMutex;
++        std::shared_ptr<void> g_callback;
++        CdnMgrStartFn g_origMgrDlStart = nullptr;
++        CdnMgrStartFn g_origMgrUlStart = nullptr;
++        UploadCbCallFn g_origUlCbCall = nullptr;
++        std::unordered_set<std::string> g_tracked;
++        std::unordered_map<std::string, UploadDone> g_completed;
++        std::atomic<uint64_t> g_taskSeq{0};
++        std::atomic<bool> g_hooksReady{false};
++        uintptr_t g_base = 0;
++
++        bool IsHex(const char* s, size_t n) {
++            if (!s || !n) return false;
++            for (size_t i = 0; i < n; ++i) {
++                if (!std::isxdigit(static_cast<unsigned char>(s[i]))) return false;
++            }
++            return true;
++        }
++
++        bool TryReadWxStr(const void* field, char* buf, size_t cap, size_t* outLen) {
++            __try {
++                if (!field || !buf || !outLen || cap == 0) return false;
++                const auto words = static_cast<const uintptr_t*>(field);
++                const size_t len = words[2];
++                const size_t scap = words[3];
++                if (len >= cap || scap < len) return false;
++                const char* src = scap < 16 ? static_cast<const char*>(field) : reinterpret_cast<const char*>(words[0]);
++                if (!src) return false;
++                std::memcpy(buf, src, len);
++                buf[len] = '\0';
++                *outLen = len;
++                return true;
++            } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
++        }
++
++        std::string ReadStrBounded(const void* field, size_t maxLen) {
++            std::vector<char> buf(maxLen + 1, '\0');
++            size_t outLen = 0;
++            if (!TryReadWxStr(field, buf.data(), buf.size(), &outLen)) return {};
++            return std::string(buf.data(), outLen);
++        }
++
++        bool TryReadUploadResultScalars(const void* resultPtr, int* outCode, uint64_t* outBytes) {
++            __try {
++                if (!resultPtr || !outCode || !outBytes) return false;
++                const auto p = static_cast<const unsigned char*>(resultPtr);
++                *outCode = *reinterpret_cast<const int32_t*>(p + 0x10);
++                *outBytes = *reinterpret_cast<const uint64_t*>(p + 0x150);
++                return true;
++            } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
++        }
++
++        bool IsValidCallbackReq(void* request, uintptr_t expectedVtable) {
++            __try {
++                if (!request) return false;
++                const auto pair = static_cast<void**>(request);
++                return pair[0] && pair[1] && *static_cast<uintptr_t*>(pair[0]) == expectedVtable;
++            } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
++        }
++
++        void CaptureCallbackFromReq(void* request) {
++            if (!request || !g_base) return;
++            if (!IsValidCallbackReq(request, g_base + kCallbackVtable)) return;
++            std::lock_guard<std::mutex> lock(g_cdnMutex);
++            g_callback = *reinterpret_cast<const std::shared_ptr<void>*>(request);
++        }
++
++        int __fastcall HookMgrDlStart(void* mgr, void* req) {
++            CaptureCallbackFromReq(req);
++            return g_origMgrDlStart(mgr, req);
++        }
++
++        int __fastcall HookMgrUlStart(void* mgr, void* req) {
++            CaptureCallbackFromReq(req);
++            return g_origMgrUlStart(mgr, req);
++        }
++
++        int __fastcall HookUlCbCall(const void* taskKeyPtr, const void* resultPtr, void* taskPtr) {
++            const std::string key = ReadStrBounded(taskKeyPtr, 256);
++            if (!key.empty()) {
++                bool tracked = false;
++                {
++                    std::lock_guard<std::mutex> lock(g_cdnMutex);
++                    tracked = g_tracked.find(key) != g_tracked.end();
++                }
++                if (tracked) {
++                    UploadDone done;
++                    if (TryReadUploadResultScalars(resultPtr, &done.code, &done.bytes) && done.code == 0) {
++                        const auto p = static_cast<const unsigned char*>(resultPtr);
++                        constexpr size_t kOffsets[] = {0x70, 0x90, 0x48, 0xb0, 0xd0, 0xf0, 0x130};
++                        for (size_t off : kOffsets) {
++                            const std::string s = ReadStrBounded(p + off, 4096);
++                            if (s.empty()) continue;
++                            if (done.aeskey.empty() && s.size() == 32 && IsHex(s.data(), s.size())) {
++                                done.aeskey = s;
++                            } else if (done.fileid.empty() && s.size() >= 60 && IsHex(s.data(), s.size())) {
++                                done.fileid = s;
++                            }
++                        }
++                    }
++                    std::lock_guard<std::mutex> lock(g_cdnMutex);
++                    if (g_completed.size() >= 256) g_completed.clear();
++                    g_completed[key] = std::move(done);
++                    g_tracked.erase(key);
++                }
++            }
++            return g_origUlCbCall(taskKeyPtr, resultPtr, taskPtr);
++        }
++
++        bool AssignNativeStr(uintptr_t base, void* field, const char* text, size_t len) {
++            __try {
++                auto words = static_cast<uintptr_t*>(field);
++                if (len > words[3]) {
++                    reinterpret_cast<void*(__fastcall*)(void*, size_t, void*, const char*)>(base + kGrowString)(
++                        field, len, nullptr, text);
++                } else {
++                    char* dst = words[3] < 16 ? static_cast<char*>(field) : reinterpret_cast<char*>(words[0]);
++                    std::memcpy(dst, text, len);
++                    dst[len] = '\0';
++                    words[2] = len;
++                }
++                return true;
++            } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
++        }
++
++        int CallStartUpload(uintptr_t base, void* req) {
++            __try {
++                return reinterpret_cast<StartUploadFn>(base + kStartUpload)(req);
++            } __except (EXCEPTION_EXECUTE_HANDLER) { return INT_MIN; }
++        }
++
++        bool DestructUploadReq(uintptr_t base, void* req) {
++            __try {
++                reinterpret_cast<void(__fastcall*)(void*)>(base + kDestructUpload)(req);
++                return true;
++            } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
++        }
++
++        void InitUploadReq(unsigned char* req, unsigned fileType) {
++            std::memset(req, 0, kUploadRequestBytes);
++            constexpr size_t kStrOff[] = {
++                0x10, 0x30, 0x58, 0x80, 0xa0, 0xd0, 0xf0, 0x120,
++                0x140, 0x160, 0x180, 0x1a0, 0x200, 0x228, 0x258, 0x278,
++                0x298, 0x2b8, 0x2d8, 0x300, 0x320, 0x348, 0x368, 0x390,
++                0x3b0, 0x3d0,
++            };
++            for (size_t off : kStrOff) {
++                auto words = reinterpret_cast<uintptr_t*>(req + off);
++                words[2] = 0;
++                words[3] = 0xF;
++            }
++            *reinterpret_cast<uint32_t*>(req + 0x50) = 1;
++            *reinterpret_cast<uint32_t*>(req + 0x54) = 1;
++            req[0xc0] = 1;
++            *reinterpret_cast<uint32_t*>(req + 0xc4) = fileType;
++            *reinterpret_cast<uint64_t*>(req + 0x118) = UINT64_MAX;
++            *reinterpret_cast<uint32_t*>(req + 0x1fc) = 1;
++            *reinterpret_cast<uint64_t*>(req + 0x248) = 1;
++            req[0x251] = 1;
++            req[0x2f9] = 1;
++            *reinterpret_cast<uint32_t*>(req + 0x388) = 0x50;
++        }
++
++        bool Utf8ToWide(const std::string& utf8, std::wstring& out) {
++            const int n = MultiByteToWideChar(
++                CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
++            if (n <= 0) return false;
++            out.resize(static_cast<size_t>(n));
++            return MultiByteToWideChar(
++                CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), out.data(), n) == n;
++        }
++
++        std::string WideToUtf8(const std::wstring& w) {
++            if (w.empty()) return {};
++            const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
++            if (n <= 0) return {};
++            std::string out(static_cast<size_t>(n), '\0');
++            WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), n, nullptr, nullptr);
++            return out;
++        }
++
++        bool ComputeFileMd5AndSize(const std::wstring& wpath, std::string& md5Hex, uint64_t& byteCount) {
++            HANDLE hFile = CreateFileW(
++                wpath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
++            if (hFile == INVALID_HANDLE_VALUE) return false;
++            LARGE_INTEGER li{};
++            if (!GetFileSizeEx(hFile, &li) || li.QuadPart <= 0) {
++                CloseHandle(hFile);
++                return false;
++            }
++            byteCount = static_cast<uint64_t>(li.QuadPart);
++
++            BCRYPT_ALG_HANDLE alg = nullptr;
++            BCRYPT_HASH_HANDLE hash = nullptr;
++            DWORD objSize = 0, cbData = 0;
++            bool ok = BCryptOpenAlgorithmProvider(&alg, BCRYPT_MD5_ALGORITHM, nullptr, 0) == 0;
++            if (ok) ok = BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objSize), sizeof(objSize), &cbData, 0) == 0;
++            std::vector<unsigned char> obj(objSize);
++            if (ok) ok = BCryptCreateHash(alg, &hash, obj.data(), objSize, nullptr, 0, 0) == 0;
++            std::vector<unsigned char> buf(65536);
++            DWORD readBytes = 0;
++            while (ok && ReadFile(hFile, buf.data(), static_cast<DWORD>(buf.size()), &readBytes, nullptr) && readBytes > 0) {
++                ok = BCryptHashData(hash, buf.data(), readBytes, 0) == 0;
++            }
++            unsigned char digest[16]{};
++            if (ok) ok = BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0;
++            if (hash) BCryptDestroyHash(hash);
++            if (alg) BCryptCloseAlgorithmProvider(alg, 0);
++            CloseHandle(hFile);
++            if (!ok) return false;
++            char hex[33]{};
++            for (size_t i = 0; i < 16; ++i) snprintf(hex + i * 2, 3, "%02x", digest[i]);
++            md5Hex.assign(hex, 32);
++            return true;
++        }
++
++        std::string EscapeXml(const std::string& text) {
++            std::string out;
++            out.reserve(text.size() + 16);
++            for (char ch : text) {
++                switch (ch) {
++                case '&': out += "&amp;"; break;
++                case '<': out += "&lt;"; break;
++                case '>': out += "&gt;"; break;
++                case '"': out += "&quot;"; break;
++                case '\'': out += "&apos;"; break;
++                default: out += ch; break;
++                }
++            }
++            return out;
++        }
++    }
++
++    void InstallFileCdnHooks()
++    {
++        if (FileTransfer::g_hooksReady.load()) return;
++        uintptr_t base = GetWeixinDllBase();
++        if (!base) return;
++        FileTransfer::g_base = base;
++
++        const unsigned char pMgr[]{0x55, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48, 0x81};
++        const unsigned char pCb[]{0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41};
++        const unsigned char pDtor[]{0x41, 0x56, 0x56, 0x57, 0x53};
++        if (std::memcmp(reinterpret_cast<void*>(base + FileTransfer::kCdnMgrDlStart), pMgr, sizeof(pMgr)) ||
++            std::memcmp(reinterpret_cast<void*>(base + FileTransfer::kCdnMgrUlStart), pMgr, sizeof(pMgr)) ||
++            std::memcmp(reinterpret_cast<void*>(base + FileTransfer::kCdnUlCbCall), pCb, sizeof(pCb)) ||
++            std::memcmp(reinterpret_cast<void*>(base + FileTransfer::kDestructUpload), pDtor, sizeof(pDtor))) {
++            return;
++        }
++
++        auto hookOne = [base](uintptr_t rva, LPVOID detour, LPVOID* orig) -> bool {
++            void* target = reinterpret_cast<void*>(base + rva);
++            if (MH_CreateHook(target, detour, orig) != MH_OK) return false;
++            return MH_EnableHook(target) == MH_OK;
++        };
++        if (hookOne(FileTransfer::kCdnMgrDlStart, FileTransfer::HookMgrDlStart, reinterpret_cast<LPVOID*>(&FileTransfer::g_origMgrDlStart)) &&
++            hookOne(FileTransfer::kCdnMgrUlStart, FileTransfer::HookMgrUlStart, reinterpret_cast<LPVOID*>(&FileTransfer::g_origMgrUlStart)) &&
++            hookOne(FileTransfer::kCdnUlCbCall, FileTransfer::HookUlCbCall, reinterpret_cast<LPVOID*>(&FileTransfer::g_origUlCbCall))) {
++            FileTransfer::g_hooksReady.store(true);
++        }
++    }
++
++    bool SendFile(const std::string& to_wxid, const std::string& file_path, std::string& error_out)
++    {
++        error_out.clear();
++        if (to_wxid.empty() || file_path.empty() || !GetModuleHandleA("Weixin.dll")) {
++            error_out = "invalid_arguments";
++            return false;
++        }
++        if (g_AppMsgSubmitManager == 0) {
++            error_out = "appmsg_manager_not_ready";
++            return false;
++        }
++        if (!FileTransfer::g_hooksReady.load()) {
++            error_out = "cdn_hook_not_installed";
++            return false;
++        }
++        uintptr_t base = GetWeixinDllBase();
++        if (!base) {
++            error_out = "weixin_dll_not_found";
++            return false;
++        }
++        std::shared_ptr<void> retained;
++        {
++            std::lock_guard<std::mutex> lock(FileTransfer::g_cdnMutex);
++            retained = FileTransfer::g_callback;
++        }
++        if (!retained) {
++            error_out = "cdn_callback_not_ready";
++            return false;
++        }
++
++        std::wstring wpath;
++        if (!FileTransfer::Utf8ToWide(file_path, wpath)) {
++            error_out = "invalid_utf8_path";
++            return false;
++        }
++        std::string md5Hex;
++        uint64_t byteCount = 0;
++        if (!FileTransfer::ComputeFileMd5AndSize(wpath, md5Hex, byteCount) ||
++            byteCount == 0 || byteCount > 200ULL * 1024ULL * 1024ULL) {
++            error_out = "file_read_or_size_error";
++            return false;
++        }
++
++        const std::filesystem::path fsPath(wpath);
++        const std::string title = FileTransfer::WideToUtf8(fsPath.filename().wstring());
++        std::wstring wext = fsPath.extension().wstring();
++        if (!wext.empty() && wext[0] == L'.') wext.erase(0, 1);
++        const std::string fileext = FileTransfer::WideToUtf8(wext);
++
++        const uint64_t seq = ++FileTransfer::g_taskSeq;
++        const std::string taskKey = format_string("hook_file_%llu_%llu",
++            static_cast<unsigned long long>(GetTickCount64()), static_cast<unsigned long long>(seq));
++        {
++            std::lock_guard<std::mutex> lock(FileTransfer::g_cdnMutex);
++            if (FileTransfer::g_tracked.size() >= 256) FileTransfer::g_tracked.clear();
++            FileTransfer::g_tracked.insert(taskKey);
++            FileTransfer::g_completed.erase(taskKey);
++        }
++
++        const unsigned fileType = byteCount > 25ULL * 1024ULL * 1024ULL ? 7u : 5u;
++        alignas(16) unsigned char reqBuf[FileTransfer::kUploadRequestBytes]{};
++        FileTransfer::InitUploadReq(reqBuf, fileType);
++        *reinterpret_cast<std::shared_ptr<void>*>(reqBuf) = retained;
++        const bool assigned =
++            FileTransfer::AssignNativeStr(base, reqBuf + 0x10, taskKey.c_str(), taskKey.size()) &&
++            FileTransfer::AssignNativeStr(base, reqBuf + 0x58, taskKey.c_str(), taskKey.size()) &&
++            FileTransfer::AssignNativeStr(base, reqBuf + 0x120, file_path.c_str(), file_path.size());
++        const int rc = assigned ? FileTransfer::CallStartUpload(base, reqBuf) : INT_MIN;
++        FileTransfer::DestructUploadReq(base, reqBuf);
++        if (rc != 0) {
++            std::lock_guard<std::mutex> lock(FileTransfer::g_cdnMutex);
++            FileTransfer::g_tracked.erase(taskKey);
++            error_out = format_string("cdn_upload_submit_failed_%d", rc);
++            return false;
++        }
++
++        FileTransfer::UploadDone done;
++        bool finished = false;
++        const ULONGLONG deadline = GetTickCount64() + 45000ULL;
++        while (GetTickCount64() < deadline) {
++            {
++                std::lock_guard<std::mutex> lock(FileTransfer::g_cdnMutex);
++                const auto it = FileTransfer::g_completed.find(taskKey);
++                if (it != FileTransfer::g_completed.end()) {
++                    done = it->second;
++                    FileTransfer::g_completed.erase(it);
++                    finished = true;
++                }
++            }
++            if (finished) break;
++            Sleep(50);
++        }
++        if (!finished) {
++            std::lock_guard<std::mutex> lock(FileTransfer::g_cdnMutex);
++            FileTransfer::g_tracked.erase(taskKey);
++            error_out = "cdn_upload_timeout";
++            return false;
++        }
++        if (done.code != 0 || done.fileid.empty() || done.aeskey.size() != 32) {
++            error_out = format_string("cdn_upload_completion_%d", done.code);
++            return false;
++        }
++
++        const std::string attachId = "@cdn_" + done.fileid + "_" + done.aeskey + "_1";
++        const std::string xml =
++            "<appmsg appid=\"\" sdkver=\"0\">"
++            "<title>" + FileTransfer::EscapeXml(title) + "</title>"
++            "<des></des>"
++            "<action>view</action>"
++            "<type>6</type>"
++            "<showtype>0</showtype>"
++            "<soundtype>0</soundtype>"
++            "<mediatagname></mediatagname>"
++            "<messageext></messageext>"
++            "<messageaction></messageaction>"
++            "<content></content>"
++            "<contentattr>0</contentattr>"
++            "<url></url><lowurl></lowurl><dataurl></dataurl><lowdataurl></lowdataurl>"
++            "<appattach>"
++            "<totallen>" + std::to_string(byteCount) + "</totallen>"
++            "<attachid>" + attachId + "</attachid>"
++            "<cdnattachurl>" + done.fileid + "</cdnattachurl>"
++            "<aeskey>" + done.aeskey + "</aeskey>"
++            "<encryver>0</encryver>"
++            "<fileext>" + FileTransfer::EscapeXml(fileext) + "</fileext>"
++            "</appattach>"
++            "<extinfo></extinfo><sourceusername></sourceusername><sourcedisplayname></sourcedisplayname>"
++            "<thumburl></thumburl><md5>" + md5Hex + "</md5><statextstr></statextstr>"
++            "</appmsg>";
++
++        if (!SendAppMsg(to_wxid, xml, 6)) {
++            error_out = "send_appmsg_failed";
++            return false;
++        }
++        return true;
++    }
+ }
+diff --git a/x64_Version_dll.vcxproj b/x64_Version_dll.vcxproj
+index fa08905..1f8307c 100644
+--- a/x64_Version_dll.vcxproj
++++ b/x64_Version_dll.vcxproj
+@@ -191,6 +191,7 @@
+     <ClInclude Include="include\requests.h" />
+     <ClInclude Include="include\version_proxy.h" />
+     <ClInclude Include="include\QueryDB.h" />
++    <ClInclude Include="include\SendFileMsg.h" />
+     <ClInclude Include="include\SendImageMsg.h" />
+     <ClInclude Include="include\SendTextMsg.h" />
+     <ClInclude Include="include\tools.h" />
+@@ -225,6 +226,7 @@
+     <ClCompile Include="src\requests.cpp" />
+     <ClCompile Include="src\version_proxy.cpp" />
+     <ClCompile Include="src\QueryDB.cpp" />
++    <ClCompile Include="src\SendFileMsg.cpp" />
+     <ClCompile Include="src\SendImageMsg.cpp" />
+     <ClCompile Include="src\SendTextMsg.cpp" />
+     <ClCompile Include="src\tools.cpp" />

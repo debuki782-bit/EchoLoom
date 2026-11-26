@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from .context import ContextWindow
 from .context_builder import ContextBuilder, ContextSpec
-from .media import WeChatImageIngestor, WeChatVoiceIngestor
+from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
 from .memory_store import MemoryStore
 from .message_ingestor import (
     MessageIngestor,
@@ -38,6 +38,7 @@ class MessageContextAssembler:
         resolve_contact=None,
         image_ingestor: WeChatImageIngestor | None = None,
         voice_ingestor: WeChatVoiceIngestor | None = None,
+        file_ingestor: WeChatFileIngestor | None = None,
         daily_environment: DailyEnvironmentProvider | None = None,
         max_user_bytes: int = 32_000,
         archive_envelope=default_archive_envelope,
@@ -49,6 +50,7 @@ class MessageContextAssembler:
         self.resolve_contact = resolve_contact
         self.image_ingestor = image_ingestor
         self.voice_ingestor = voice_ingestor
+        self.file_ingestor = file_ingestor
         self.daily_environment = daily_environment
         self.max_user_bytes = max_user_bytes
         self.archive_envelope = archive_envelope
@@ -57,6 +59,7 @@ class MessageContextAssembler:
             memory_store,
             image_ingestor=image_ingestor,
             voice_ingestor=voice_ingestor,
+            file_ingestor=file_ingestor,
             archive_envelope=archive_envelope,
         )
         self.builder = ContextBuilder(

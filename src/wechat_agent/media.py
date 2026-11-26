@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import mimetypes
 import re
 import tempfile
 import wave
@@ -12,13 +13,15 @@ from pathlib import Path
 import httpx
 from PIL import Image, ImageDraw
 
-from .connectors.base import connector_ensure_ready
+from .connectors.base import connector_ensure_ready, connector_fetch_received_file
 from .contacts import is_group_conversation
 from .media_artifacts import (
-    MAX_ORIGINAL_IMAGE_BYTES as MAX_ORIGINAL_IMAGE_BYTES,
+    MAX_FILE_BYTES,
+    MAX_ORIGINAL_IMAGE_BYTES,  # noqa: F401 - re-exported for legacy callers
+    FileIngestError,
     ImageIngestError,
     _file_hash,
-    _file_md5 as _file_md5,
+    _file_md5,  # noqa: F401 - re-exported for legacy callers
     _image_format,
 )
 from .memory_store import MemoryStore
@@ -482,6 +485,117 @@ class _BoundedBuffer(io.BytesIO):
 
 
 
+
+
+class WeChatFileIngestor:
+    """Resolve and archive inbound chat files under data/received-files."""
+
+    def __init__(self, workspace: Path, *, gateway=None):
+        self.workspace = Path(workspace)
+        self.gateway = gateway if gateway is not None else create_gateway(GatewayConfig(self.workspace))
+        self.artifact_root = self.workspace / "data" / "received-files"
+
+    @staticmethod
+    def _safe_filename(filename: str, fileext: str) -> str:
+        base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        cleaned = re.sub(r'[<>:"|?*\x00-\x1f]', "_", base).strip().strip(".")
+        if not cleaned or cleaned in (".", ".."):
+            cleaned = "file"
+        ext = fileext.strip().lstrip(".").casefold()[:32]
+        if ext and not cleaned.casefold().endswith("." + ext):
+            cleaned = f"{cleaned[:80]}.{ext}"
+        if len(cleaned) > 120:
+            stem, dot, suffix = cleaned.rpartition(".")
+            cleaned = (stem[:96] + dot + suffix[:20]) if dot else cleaned[:120]
+        return cleaned
+
+    def ingest(
+        self,
+        *,
+        item: MessageEvent,
+        message_id: str,
+        references: list[dict[str, str]],
+        store: MemoryStore,
+        metadata: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        values = {ref.get("field"): ref.get("value", "") for ref in references}
+        meta = metadata or {}
+        raw_filename = str(meta.get("filename") or values.get("title") or "").strip() or "unnamed"
+        raw_ext = str(meta.get("fileext") or values.get("fileext") or "").strip().lstrip(".").casefold()
+        expected_bytes_raw = meta.get("size_bytes") or values.get("totallen")
+        expected_bytes = (
+            int(expected_bytes_raw)
+            if isinstance(expected_bytes_raw, int)
+            or (isinstance(expected_bytes_raw, str) and expected_bytes_raw.isdigit())
+            else None
+        )
+        expected_md5_raw = str(meta.get("md5") or values.get("md5") or "").strip().lower()
+        expected_md5 = expected_md5_raw if re.fullmatch(r"[0-9a-f]{32}", expected_md5_raw) else None
+        safe_name = self._safe_filename(raw_filename, raw_ext)
+        try:
+            record = store.begin_file_ingest(
+                account_id=item.account_id,
+                conversation_id=item.conversation_id,
+                message_id=message_id,
+                original_references=references,
+                filename=safe_name,
+                fileext=raw_ext or Path(safe_name).suffix.lstrip(".").casefold(),
+                expected_bytes=expected_bytes,
+                expected_md5=expected_md5,
+            )
+            if record["state"] == "ready":
+                return store.file_metadata_for_message(
+                    account_id=item.account_id, message_id=message_id,
+                ) or {"state": "failed", "error_code": "stored_file_unavailable"}
+
+            file_id = str(record["file_id"])
+            self.artifact_root.mkdir(parents=True, exist_ok=True)
+            temporary = self.artifact_root / f".{file_id}.pending"
+            final = self.artifact_root / f"{file_id}_{safe_name}"
+            if not final.resolve().is_relative_to(self.artifact_root.resolve()):
+                raise FileIngestError("invalid_archived_file_path")
+            temporary.unlink(missing_ok=True)
+            try:
+                digest, size = connector_fetch_received_file(
+                    self.gateway, item, references, temporary,
+                )
+                if size <= 0 or size > MAX_FILE_BYTES:
+                    raise FileIngestError("received_file_size_out_of_range")
+                mime_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+                temporary.replace(final)
+                store.complete_file_ingest(
+                    file_id=file_id,
+                    account_id=item.account_id,
+                    artifact_path=str(final.resolve()),
+                    mime_type=mime_type,
+                    byte_count=size,
+                    sha256=digest,
+                )
+            finally:
+                temporary.unlink(missing_ok=True)
+            return store.file_metadata_for_message(
+                account_id=item.account_id, message_id=message_id,
+            ) or {"state": "failed", "error_code": "stored_file_unavailable"}
+        except FileIngestError as exc:
+            return store.fail_file_ingest_for_message(
+                account_id=item.account_id,
+                message_id=message_id,
+                error_code=exc.code,
+                filename=safe_name,
+                fileext=raw_ext,
+                expected_bytes=expected_bytes,
+                expected_md5=expected_md5,
+            )
+        except Exception:  # noqa: BLE001
+            return store.fail_file_ingest_for_message(
+                account_id=item.account_id,
+                message_id=message_id,
+                error_code="received_file_ingest_failed",
+                filename=safe_name,
+                fileext=raw_ext,
+                expected_bytes=expected_bytes,
+                expected_md5=expected_md5,
+            )
 
 
 def wechat_storage_root_from_status(status, account_id):

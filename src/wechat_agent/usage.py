@@ -14,7 +14,7 @@ IMAGE_GENERATION_DAILY_BUDGET_MICROUSD = 1_000_000
 
 _BUDGET_GROUP_FEATURES = {
     "text_model": ("adk_chat", "chat", "voice_transcription", "episode_embedding"),
-    "image_read": ("adk_chat_image_context", "image_description"),
+    "image_read": ("adk_chat_image_context", "image_description", "file_description"),
     "image_generation": ("image_generate",),
 }
 
@@ -265,3 +265,109 @@ class UsageLedger:
         with self.repository.read_lock() as conn:
             value = conn.execute(query, params).fetchone()[0]
         return int(value)
+
+    def _stale_reservation_rows(
+        self,
+        conn,
+        account_id: str,
+        day_local: str,
+        *,
+        min_age_seconds: float,
+        budget_group: str | None = None,
+    ) -> list[dict[str, object]]:
+        if min_age_seconds < 0:
+            raise ValueError("min_age_seconds must be non-negative")
+        now_dt = datetime.fromisoformat(self.clock.now())
+        if now_dt.tzinfo is None:
+            raise ValueError("usage clock must be timezone-aware")
+        day = date.fromisoformat(day_local)
+        day_start, day_end = _day_bounds(day)
+        query = (
+            "SELECT request_id,conversation_id,feature,model_id,reserved_microusd,"
+            "created_at,budget_scope_id FROM usage_reservations "
+            "WHERE account_id=? AND state='reserved' AND created_at>=? AND created_at<?"
+        )
+        params: tuple[object, ...] = (account_id, day_start, day_end)
+        if budget_group is not None:
+            features = _BUDGET_GROUP_FEATURES.get(budget_group)
+            if features is None:
+                raise ValueError("unknown budget group")
+            group_start = self._group_window_start(
+                conn, account_id, budget_group, day_start, day_end,
+            )
+            placeholders = ",".join("?" for _ in features)
+            query = (
+                "SELECT request_id,conversation_id,feature,model_id,reserved_microusd,"
+                "created_at,budget_scope_id FROM usage_reservations "
+                "WHERE account_id=? AND state='reserved' AND created_at>=? AND created_at<? "
+                f"AND feature IN ({placeholders})"
+            )
+            params = (account_id, group_start, day_end, *features)
+        stale: list[dict[str, object]] = []
+        for row in conn.execute(query + " ORDER BY created_at ASC", params).fetchall():
+            created_dt = datetime.fromisoformat(str(row["created_at"]))
+            if created_dt.tzinfo is None:
+                continue
+            age = (now_dt.astimezone(UTC) - created_dt.astimezone(UTC)).total_seconds()
+            if age >= min_age_seconds:
+                stale.append({
+                    "request_id": str(row["request_id"]),
+                    "conversation_id": str(row["conversation_id"]),
+                    "feature": str(row["feature"]),
+                    "model_id": str(row["model_id"]),
+                    "reserved_microusd": int(row["reserved_microusd"]),
+                    "created_at": str(row["created_at"]),
+                    "budget_scope_id": str(row["budget_scope_id"]),
+                    "age_seconds": round(age, 1),
+                })
+        return stale
+
+    def stale_reservations(
+        self,
+        account_id: str,
+        day_local: str,
+        *,
+        min_age_seconds: float = 300.0,
+        budget_group: str | None = None,
+    ) -> list[dict[str, object]]:
+        """List un-settled `reserved` rows older than `min_age_seconds` on `day_local`."""
+        with self.repository.read_lock() as conn:
+            return self._stale_reservation_rows(
+                conn,
+                account_id,
+                day_local,
+                min_age_seconds=min_age_seconds,
+                budget_group=budget_group,
+            )
+
+    def release_stale_reservations(
+        self,
+        account_id: str,
+        day_local: str,
+        *,
+        min_age_seconds: float = 300.0,
+        budget_group: str | None = None,
+        reason: str = "",
+    ) -> int:
+        """Explicitly release aged `reserved` rows without disturbing `settled` spend."""
+        _ = reason
+        now_iso = self.clock.now()
+        with self.repository.transaction() as conn:
+            stale = self._stale_reservation_rows(
+                conn,
+                account_id,
+                day_local,
+                min_age_seconds=min_age_seconds,
+                budget_group=budget_group,
+            )
+            if not stale:
+                return 0
+            released = 0
+            for item in stale:
+                cursor = conn.execute(
+                    "UPDATE usage_reservations SET state='released',updated_at=? "
+                    "WHERE request_id=? AND state='reserved'",
+                    (now_iso, item["request_id"]),
+                )
+                released += int(cursor.rowcount)
+            return released

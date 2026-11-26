@@ -8,9 +8,14 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from .media import WeChatImageIngestor, WeChatVoiceIngestor
+from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
 from .memory_store import MemoryStore
-from .rich_message import normalized_image_reference_records, quoted_message_reference
+from .rich_message import (
+    normalized_file_metadata,
+    normalized_file_references,
+    normalized_image_reference_records,
+    quoted_message_reference,
+)
 from .temporal_context import message_time_context
 from .wechat_gateway import MessageEvent, default_archive_envelope
 
@@ -34,6 +39,12 @@ def entity_search_text(item: MessageEvent) -> str:
         return "图片/表情消息"
     if item.original_message_type == 34:
         return "语音消息"
+    if item.original_message_type == 49:
+        file_meta = normalized_file_metadata(item.text)
+        if file_meta is not None:
+            name = str(file_meta.get("filename") or "").strip()
+            prefix = "文件消息" if file_meta.get("kind") == "file_message" else "文件上传通知"
+            return f"{prefix} {name}".strip()
     if item.is_group and item.text.startswith(item.sender_id + ":\n"):
         return item.text[len(item.sender_id) + 2 :]
     return item.text
@@ -104,12 +115,26 @@ class MessageIngestor:
         *,
         image_ingestor: WeChatImageIngestor | None = None,
         voice_ingestor: WeChatVoiceIngestor | None = None,
+        file_ingestor: WeChatFileIngestor | None = None,
         archive_envelope: Callable[[MessageEvent], dict] = default_archive_envelope,
     ) -> None:
         self.memory_store = memory_store
         self.image_ingestor = image_ingestor
         self.voice_ingestor = voice_ingestor
+        self.file_ingestor = file_ingestor
         self.archive_envelope = archive_envelope
+
+    def _resolve_file_ingestor(self) -> WeChatFileIngestor | None:
+        if self.file_ingestor is not None:
+            return self.file_ingestor
+        img = self.image_ingestor
+        if img is not None:
+            gw = getattr(img, "gateway", None)
+            ws = getattr(img, "workspace", None)
+            if ws is not None and "file_fetch" in getattr(gw, "capabilities", ()):
+                self.file_ingestor = WeChatFileIngestor(ws, gateway=gw)
+                return self.file_ingestor
+        return None
 
     async def ingest(self, observations: Sequence[MessageEvent]) -> IngestedBatch:
         """Archive inbound observations and ingest their media without cross-chat scanning."""
@@ -197,6 +222,36 @@ class MessageIngestor:
                         store=self.memory_store,
                     )
 
+            file_metadata: dict[str, object] | None = None
+            if item.original_message_type == 49:
+                parsed_file = normalized_file_metadata(item.text)
+                if parsed_file is not None and parsed_file.get("kind") == "file_message":
+                    file_refs = list(normalized_file_references(item.text))
+                    ingestor = self._resolve_file_ingestor()
+                    if ingestor is None:
+                        raw_size = parsed_file.get("size_bytes")
+                        expected_bytes = raw_size if isinstance(raw_size, int) else None
+                        raw_md5 = parsed_file.get("md5")
+                        expected_md5 = raw_md5 if isinstance(raw_md5, str) else None
+                        file_metadata = self.memory_store.fail_file_ingest_for_message(
+                            account_id=item.account_id,
+                            message_id=archived.message_id,
+                            error_code="file_ingestor_not_configured",
+                            filename=str(parsed_file.get("filename") or "unnamed"),
+                            fileext=str(parsed_file.get("fileext") or ""),
+                            expected_bytes=expected_bytes,
+                            expected_md5=expected_md5,
+                        )
+                    else:
+                        file_metadata = await asyncio.to_thread(
+                            ingestor.ingest,
+                            item=item,
+                            message_id=archived.message_id,
+                            references=file_refs,
+                            store=self.memory_store,
+                            metadata=parsed_file,
+                        )
+
             records.append(
                 {
                     "message_id": archived.message_id,
@@ -207,6 +262,7 @@ class MessageIngestor:
                     "entity_search_text": entity_search_text(item),
                     "image": image_metadata,
                     "audio": audio_metadata,
+                    "file": file_metadata,
                 }
             )
 

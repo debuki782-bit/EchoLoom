@@ -71,6 +71,14 @@ def _format_inbound_payload(raw_json: str) -> str:
         inner = None
     if isinstance(inner, dict):
         kind = inner.get("kind")
+        if kind == "file_message":
+            name = _compact(inner.get("filename") or inner.get("text") or "文件", 120)
+            size_val = inner.get("size_bytes")
+            size_text = f" ({size_val} B)" if isinstance(size_val, int) else ""
+            return f"[文件] {name}{size_text}"
+        if kind == "file_upload_notice":
+            name = _compact(inner.get("filename") or inner.get("text") or "文件", 120)
+            return f"[文件上传中] {name}"
         if kind == "app_message":
             title = _compact(inner.get("text") or "", 120)
             des = _compact(inner.get("description") or "", 80)

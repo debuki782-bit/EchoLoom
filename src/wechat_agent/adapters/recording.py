@@ -10,19 +10,22 @@ import json
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from ..contacts import is_contact_id
-from ..media_artifacts import ImageIngestError
 from ..connectors.base import AccountState, GatewayConfig, MessageEvent, SendResult, VoicePayload
+from ..contacts import is_contact_id
+from ..media_artifacts import FileIngestError, ImageIngestError
 
 
 class RecordingGateway:
-    capabilities = frozenset({"text", "image", "quote", "contacts", "image_fetch", "voice"})
+    capabilities = frozenset(
+        {"text", "image", "file", "quote", "contacts", "image_fetch", "file_fetch", "voice"}
+    )
 
     def __init__(self, config: GatewayConfig):
         self.config = config
         self.allowed = set(config.allowed_conversations)
         self.contacts = {}
         self.images: dict[str, bytes] = {}
+        self.files: dict[str, bytes] = {}
         self.voices: dict[str, VoicePayload] = {}
         self.outbound: list[dict] = []
         self.closed = False
@@ -89,6 +92,17 @@ class RecordingGateway:
                               "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
         return "queued", "recorded_locally_not_delivery_proof"
 
+    def send_file(self, conversation_id: str, path: Path):
+        if not self._allowed(self.config.account_id, conversation_id):
+            return "rejected", "sender_disabled_or_destination_not_allowed"
+        self.outbound.append({
+            "kind": "file",
+            "conversation_id": conversation_id,
+            "filename": path.name,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+        return "queued", "recorded_locally_not_delivery_proof"
+
     def send_quote(self, conversation_id: str, text: str, quote):
         if not self._allowed(self.config.account_id, conversation_id):
             return "rejected", "sender_disabled_or_destination_not_allowed"
@@ -115,6 +129,18 @@ class RecordingGateway:
 
     def fetch_thumbnail(self, item, references, destination):
         raise ImageIngestError("original_image_not_found_in_cache")
+
+    def fetch_received_file(self, item, references, destination):
+        payload = self.files.get(item.conversation_id)
+        if payload is None:
+            raise FileIngestError("received_file_not_found")
+        values = {ref.get("field"): ref.get("value", "") for ref in references}
+        expected_md5 = values.get("md5", "").strip().lower()
+        if expected_md5 and hashlib.md5(payload, usedforsecurity=False).hexdigest() != expected_md5:
+            raise FileIngestError("received_file_md5_mismatch")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        return hashlib.sha256(payload).hexdigest(), len(payload)
 
     def voice_payload(self, item):
         return self.voices.get(item.conversation_id,

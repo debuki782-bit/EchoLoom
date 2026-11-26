@@ -134,3 +134,59 @@ def test_daily_budget_resets_at_shanghai_midnight(tmp_path: Path) -> None:
     assert reserve(ledger, "after-midnight", amount=250, budget=250) == "reserved"
     assert ledger.committed_daily_microusd("bot", "2026-11-01") == 250
     repo.close()
+
+
+def test_stale_reservations_can_be_listed_and_released_without_touching_settled(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    clock = MutableClock()
+    clock.current = datetime(2026, 11, 26, 10, 0, tzinfo=UTC)
+    repo = Repository(tmp_path / "stale.sqlite3")
+    ledger = UsageLedger(repo, clock)
+
+    assert ledger.reserve(
+        request_id="settled-1",
+        account_id="bot",
+        conversation_id="room",
+        feature="adk_chat",
+        model_id="gemini-4-hydrogen",
+        maximum_microusd=150_000,
+        budget_microusd=500_000,
+        budget_group="text_model",
+    ).status == "reserved"
+    assert ledger.settle("settled-1", 50_000) == "settled"
+    assert ledger.reserve(
+        request_id="stuck-1",
+        account_id="bot",
+        conversation_id="room",
+        feature="adk_chat",
+        model_id="gemini-4-hydrogen",
+        maximum_microusd=150_000,
+        budget_microusd=500_000,
+        budget_group="text_model",
+    ).status == "reserved"
+
+    clock.current = clock.current + timedelta(seconds=400)
+    assert ledger.reserve(
+        request_id="fresh-1",
+        account_id="bot",
+        conversation_id="room",
+        feature="adk_chat",
+        model_id="gemini-4-hydrogen",
+        maximum_microusd=150_000,
+        budget_microusd=500_000,
+        budget_group="text_model",
+    ).status == "reserved"
+
+    stale = ledger.stale_reservations("bot", "2026-11-26", min_age_seconds=300.0, budget_group="text_model")
+    assert [row["request_id"] for row in stale] == ["stuck-1"]
+    released = ledger.release_stale_reservations(
+        "bot",
+        "2026-11-26",
+        min_age_seconds=300.0,
+        budget_group="text_model",
+        reason="timeout cleanup",
+    )
+    assert released == 1
+    assert ledger.committed_daily_microusd("bot", "2026-11-26", budget_group="text_model") == 200_000
+    repo.close()

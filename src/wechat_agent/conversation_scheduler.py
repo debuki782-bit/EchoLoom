@@ -608,12 +608,15 @@ class ConversationScheduler:
         batch: MessageBatch,
         error: str,
         *,
+        min_delay_seconds: float = 0.0,
         now: datetime | None = None,
     ) -> None:
         """Always return unseen running rows to pending with bounded backoff (max 300s).
 
         Never transitions unseen human messages to state='failed'.
         """
+        if not (math.isfinite(min_delay_seconds) and min_delay_seconds >= 0):
+            raise ValueError("min_delay_seconds must be finite and non-negative")
         current = now or datetime.now(UTC)
         if current.tzinfo is None:
             raise ValueError("now must be timezone-aware")
@@ -628,10 +631,11 @@ class ConversationScheduler:
             updates = []
             for row in rows:
                 attempts = int(row["attempts"])
-                delay = min(300, 2 ** min(max(0, attempts), 9))
+                base_delay = min(300, 2 ** min(max(0, attempts), 9))
+                delay = max(float(min_delay_seconds), float(base_delay))
                 retry_at = (current_utc + timedelta(seconds=delay)).isoformat()
                 if attempts >= self.ALERT_ATTEMPTS_THRESHOLD:
-                    repeated_alerts.append((str(row["receipt_id"]), attempts, delay))
+                    repeated_alerts.append((str(row["receipt_id"]), attempts, round(delay)))
                 updates.append(
                     (
                         safe_error,
