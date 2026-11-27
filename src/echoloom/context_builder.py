@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
@@ -29,7 +30,7 @@ from .db_async import run_db
 from .memory_store import MAX_QUERY_CHARS, MemoryStore
 from .message_ingestor import IngestedBatch, entity_search_text
 from .prompt_catalog import load_prompt
-from .rich_message import quoted_author_id, quoted_message_reference
+from .rich_message import pat_participant_ids, quoted_author_id, quoted_message_reference
 from .temporal_context import DailyEnvironmentProvider, message_time_context
 from .time_scheduler import TimeScheduler
 from .wechat_gateway import MessageEvent
@@ -766,19 +767,26 @@ class ContextBuilder:
         identifiers = {spec.account_id, spec.conversation_id}
         identifiers.update(priority_sender_ids)
         identifiers.update(extra_identifiers)
-        for item in spec.observations:
-            identifiers.add(item.sender_id)
-            author = quoted_author_id(item.text)
+        def _collect_text_identifiers(text: object) -> None:
+            if not isinstance(text, str) or not text:
+                return
+            identifiers.update(pat_participant_ids(text))
+            author = quoted_author_id(text)
             if author:
                 identifiers.add(author)
-            quote_ref = quoted_message_reference(item.text)
+            quote_ref = quoted_message_reference(text)
             if quote_ref:
                 identifiers.add(str(quote_ref["source_conversation_id"]))
+
+        for item in spec.observations:
+            identifiers.add(item.sender_id)
+            _collect_text_identifiers(item.text)
         for turn in spec.synthetic_turns:
             if turn.sender_id:
                 identifiers.add(turn.sender_id)
             if turn.source_conversation_id:
                 identifiers.add(turn.source_conversation_id)
+            _collect_text_identifiers(turn.text)
         for row in (
             *enriched_current,
             *enriched_quotes,
@@ -790,6 +798,8 @@ class ContextBuilder:
                 value = row.get(key)
                 if isinstance(value, str):
                     identifiers.add(value)
+            _collect_text_identifiers(row.get("body_text"))
+            _collect_text_identifiers(row.get("text"))
 
         strict_wechat = (
             all(getattr(obs, "channel", "wechat") == "wechat" for obs in spec.observations)
@@ -826,6 +836,63 @@ class ContextBuilder:
                 if value is not None
             }
         if self.memory_store is not None and safe:
+            directory_entries: list[tuple[str, str, str]] = []
+            for uid, identity in identities.items():
+                nick = (identity.nickname or "").strip()
+                if nick:
+                    source = (identity.match_source or "hook").strip() or "hook"
+                    directory_entries.append((uid, nick, source))
+            if directory_entries:
+                try:
+                    await run_db(
+                        self.memory_store.upsert_contact_directory_batch,
+                        account_id=spec.account_id,
+                        entries=directory_entries,
+                        db=self.memory_store.db,
+                        lock=self.memory_store._lock,
+                    )
+                except (sqlite3.Error, AttributeError):
+                    pass
+
+            missing = [
+                uid
+                for uid in safe
+                if identities.get(uid) is None or not (identities[uid].nickname or "").strip()
+            ]
+            if missing:
+                try:
+                    cached = await run_db(
+                        self.memory_store.contact_directory_map,
+                        account_id=spec.account_id,
+                        contact_ids=missing,
+                        db=self.memory_store.db,
+                        lock=self.memory_store._lock,
+                    )
+                except (sqlite3.Error, AttributeError):
+                    cached = {}
+                for uid in missing:
+                    entry = cached.get(uid)
+                    if not isinstance(entry, Mapping):
+                        continue
+                    nick = str(entry.get("nickname") or "").strip()
+                    if not nick:
+                        continue
+                    existing = identities.get(uid)
+                    if existing is not None and existing.remark:
+                        identities[uid] = replace(
+                            existing,
+                            display_name=f"{existing.remark}（{nick}）",
+                            nickname=nick,
+                            match_source="contact_directory_cache",
+                        )
+                    else:
+                        identities[uid] = ContactIdentity(
+                            display_name=nick,
+                            user_name=uid,
+                            nickname=nick,
+                            match_source="contact_directory_cache",
+                        )
+
             remarks = await run_db(
                 self.memory_store.sender_remarks,
                 account_id=spec.account_id,

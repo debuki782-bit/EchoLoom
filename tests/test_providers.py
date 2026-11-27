@@ -79,7 +79,7 @@ def test_one_call_uses_sender_context_and_settles_actual_usage(tmp_path: Path) -
     sent = models.calls[0]
     assert sent["model"] == "gemini-3.5-flash-lite"
     assert sent["config"].max_output_tokens == 512
-    assert "friend | friend：*{你好}*" in sent["contents"]
+    assert "friend：*{你好}*" in sent["contents"]
     row = repo.conn.execute("SELECT state,actual_microusd FROM usage_reservations").fetchone()
     assert (row["state"], row["actual_microusd"]) == ("settled", 59)
     with pytest.raises(RuntimeError, match="already_settled"):

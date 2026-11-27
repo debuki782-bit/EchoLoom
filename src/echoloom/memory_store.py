@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
@@ -881,6 +879,42 @@ class MemoryStore:
         self, *, account_id: str, sender_ids: Sequence[str]
     ) -> dict[str, str]:
         return self.knowledge.sender_remarks(account_id=account_id, sender_ids=sender_ids)
+
+    def all_sender_remarks(self, *, account_id: str) -> dict[str, str]:
+        return self.knowledge.all_sender_remarks(account_id=account_id)
+
+    def upsert_contact_directory(
+        self,
+        *,
+        account_id: str,
+        contact_id: str,
+        nickname: str,
+        alias: str = "",
+        source: str = "hook",
+    ) -> bool:
+        return self.knowledge.upsert_contact_directory(
+            account_id=account_id,
+            contact_id=contact_id,
+            nickname=nickname,
+            alias=alias,
+            source=source,
+        )
+
+    def upsert_contact_directory_batch(
+        self, *, account_id: str, entries: Sequence[tuple[str, str, str]]
+    ) -> int:
+        return self.knowledge.upsert_contact_directory_batch(
+            account_id=account_id,
+            entries=entries,
+        )
+
+    def contact_directory_map(
+        self, *, account_id: str, contact_ids: Sequence[str] | None = None
+    ) -> dict[str, dict[str, str]]:
+        return self.knowledge.contact_directory_map(
+            account_id=account_id,
+            contact_ids=contact_ids,
+        )
 
     def set_human_sender_remark(
         self,

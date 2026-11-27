@@ -2,6 +2,7 @@ const $ = (s) => document.querySelector(s);
 const state = {
   brandName: 'EchoLoom',
   overview: null,
+  names: {},
   conversation: '',
   view: 'chat',
   timelineOffset: 0,
@@ -94,7 +95,48 @@ function confirmButton(label, onConfirm, extraCls = '') {
   });
   return btn;
 }
-function chatTitle(id) { return id.startsWith('idle-event:') ? `空闲活动 · ${id.slice(-8)}` : id || '未知会话'; }
+function formatDisplayLabel(remark, nickname) {
+  const r = String(remark || '').trim();
+  const n = String(nickname || '').trim();
+  if (r && n && r !== n) return `${r}（${n}）`;
+  return r || n;
+}
+function displayName(id) {
+  const raw = String(id || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('idle-event:')) return `空闲活动 · ${raw.slice(-8)}`;
+  return state.names[raw] || raw;
+}
+function chatTitle(id) {
+  const raw = String(id || '').trim();
+  if (!raw) return '未知会话';
+  if (raw.startsWith('idle-event:')) return `空闲活动 · ${raw.slice(-8)}`;
+  return state.names[raw] || raw;
+}
+function updateNameEntry(id, remark, nickname) {
+  const key = String(id || '').trim();
+  if (!key) return;
+  const label = formatDisplayLabel(remark, nickname);
+  if (label) state.names[key] = label;
+  else delete state.names[key];
+}
+function mergeNames(names) {
+  if (!names || typeof names !== 'object') return;
+  let changed = false;
+  for (const [id, label] of Object.entries(names)) {
+    const key = String(id || '').trim();
+    const val = String(label || '').trim();
+    if (key && val && state.names[key] !== val) {
+      state.names[key] = val;
+      changed = true;
+    }
+  }
+  if (changed) {
+    renderChats();
+    updateSelectedChatHeader();
+    if (state.calls.length) renderCalls();
+  }
+}
 function chatType(id) {
   return id.startsWith('idle-event:')
     ? '空闲活动'
@@ -118,6 +160,7 @@ function renderChats() {
     list.append(el('div', 'chat-group-label', group));
     for (const row of items) {
       const button = el('button', `chat-item${state.conversation === row.id ? ' active' : ''}`); button.type = 'button';
+      button.title = row.id;
       button.append(el('div', 'chat-title', chatTitle(row.id)), el('div', 'chat-sub', `${chatType(row.id)} · ${shortTime(row.last)}`));
       button.addEventListener('click', () => selectChat(row.id)); list.append(button);
     }
@@ -143,11 +186,27 @@ function bodyText(content) {
   wrapper.append(toggle);
   return wrapper;
 }
-function message(content, who, time, extra, sender) {
+function formatTimelineSender(rawSender) {
+  const raw = String(rawSender || '').trim();
+  if (!raw) return {label: '本轮输入', title: ''};
+  if (raw.includes('|')) {
+    const idx = raw.indexOf('|');
+    const left = raw.slice(0, idx).trim();
+    const right = raw.slice(idx + 1).trim();
+    const resolved = left && state.names[left] ? state.names[left] : '';
+    const label = resolved || right || left;
+    return {label, title: left && left !== label ? left : ''};
+  }
+  const label = displayName(raw);
+  return {label, title: raw !== label ? raw : ''};
+}
+function message(content, who, time, extra, sender, senderTitle = '') {
   const row = el('article', `message ${who}`);
   if (who === 'assistant') row.append(el('div', 'message-avatar', '✳'));
   const body = el('div', 'message-body'), label = el('div', 'message-label');
-  label.append(el('span', '', who === 'assistant' ? state.brandName : (sender || '本轮输入')), el('span', 'event-time', time));
+  const senderSpan = el('span', '', who === 'assistant' ? state.brandName : (sender || '本轮输入'));
+  if (who !== 'assistant' && senderTitle) senderSpan.title = senderTitle;
+  label.append(senderSpan, el('span', 'event-time', time));
   body.append(label, bodyText(content));
   if (extra) body.append(extra);
   row.append(body);
@@ -182,8 +241,8 @@ function transcriptNodes(entry) {
     if (entry.messages?.length) {
       entry.messages.forEach((m, i) => {
         const raw = i === entry.messages.length - 1 ? details('查看 trace 中的完整输入', entry.raw) : null;
-        const sender = m.sender.includes('|') ? m.sender.split('|').slice(1).join('|').trim() : m.sender;
-        nodes.push(message(m.text, 'user', shortTime(entry.time), raw, sender));
+        const parsed = formatTimelineSender(m.sender);
+        nodes.push(message(m.text, 'user', shortTime(entry.time), raw, parsed.label, parsed.title));
       });
     } else {
       const preview = entry.raw.length > 500 ? (entry.conversation_id.startsWith('idle-event:') ? '空闲维护上下文' : '模型输入上下文') : entry.raw;
@@ -211,9 +270,23 @@ function transcriptNodes(entry) {
   }
   return nodes;
 }
+function updateSelectedChatHeader() {
+  const id = state.conversation;
+  if (!id) return;
+  const titleNode = $('#selected-chat');
+  const metaNode = $('#selected-meta');
+  titleNode.textContent = chatTitle(id);
+  titleNode.title = id;
+  const row = state.overview?.conversations?.find(x => x.id === id);
+  metaNode.textContent = row
+    ? `${chatType(id)} · ${id} · ${row.sessions} 代 Session · ${row.tool_calls} 次工具调用 · ${row.first} 至 ${row.last}`
+    : id;
+  metaNode.title = id;
+}
 async function refresh() {
   try {
     state.overview = await api('/api/overview');
+    state.names = { ...(state.overview?.names || {}) };
     if (state.overview?.brand_name) {
       state.brandName = String(state.overview.brand_name);
       document.title = `${state.brandName} · 对话与运行记录`;
@@ -225,6 +298,8 @@ async function refresh() {
     $('.status-dot').classList.toggle('off', !p?.trusted_gateway || p?.paused);
     renderChats();
     renderTools();
+    updateSelectedChatHeader();
+    if (state.calls.length) renderCalls();
     if (!state.conversation) {
       const first = state.overview.conversations.find(c => c.id && !c.id.startsWith('idle-event:')) || state.overview.conversations.find(c => c.id);
       if (first) await selectChat(first.id);
@@ -235,9 +310,7 @@ async function refresh() {
 }
 async function selectChat(id) {
   state.conversation = id; state.timelineOffset = 0; state.requestId++; setView('chat'); renderChats();
-  $('#selected-chat').textContent = chatTitle(id);
-  const row = state.overview.conversations.find(x => x.id === id);
-  $('#selected-meta').textContent = row ? `${chatType(id)} · ${row.sessions} 代 Session · ${row.tool_calls} 次工具调用 · ${row.first} 至 ${row.last}` : id;
+  updateSelectedChatHeader();
   $('#export-jsonl').href = `/api/records.jsonl?${new URLSearchParams({conversation: id})}`;
   $('#export-jsonl').classList.remove('hidden');
   await loadTimeline(true);
@@ -273,10 +346,12 @@ async function loadTimeline(reset) {
 }
 function renderCalls() {
   const list = $('#calls-list'); clear(list); const q = $('#call-search').value.toLowerCase();
-  const rows = state.calls.filter(r => `${r.name} ${r.conversation_id}`.toLowerCase().includes(q));
+  const rows = state.calls.filter(r => `${r.name} ${r.conversation_id} ${chatTitle(r.conversation_id)}`.toLowerCase().includes(q));
   for (const entry of rows) {
     const row = el('div', 'call-row');
-    row.append(el('div', 'call-conversation', `${chatTitle(entry.conversation_id)} · ${entry.time}`), toolCard(entry, true));
+    const conv = el('div', 'call-conversation', `${chatTitle(entry.conversation_id)} · ${entry.time}`);
+    if (entry.conversation_id) conv.title = entry.conversation_id;
+    row.append(conv, toolCard(entry, true));
     list.append(row);
   }
   if (!rows.length) list.append(el('div', 'empty', '没有匹配的工具调用。'));
@@ -345,20 +420,28 @@ function renderSenders() {
   const rows = state.senders.filter(row => {
     const tagText = (row.tags || []).join(' ');
     const memText = (row.memories || []).map(m => `${m.topic} ${m.content}`).join(' ');
-    return `${row.nickname} ${row.remark} ${row.sender_id} ${row.account_id} ${tagText} ${memText}`.toLowerCase().includes(q);
+    const kindText = row.is_group ? '群聊' : '';
+    return `${row.nickname} ${row.remark} ${row.sender_id} ${row.account_id} ${kindText} ${tagText} ${memText}`.toLowerCase().includes(q);
   });
   $('#sender-count').textContent = `${rows.length} / ${state.senders.length}`;
   for (const row of rows) {
+    const isGroup = Boolean(row.is_group);
     const pairKey = `${row.account_id}\0${row.sender_id}`;
     const card = el('div', 'sender-card');
     const top = el('div', 'sender-row');
     const info = el('div', 'sender-info');
     const heading = el('div', 'sender-heading');
-    heading.append(el('strong', '', row.remark ? `${row.remark}（${row.nickname || row.sender_id}）` : `（${row.nickname || row.sender_id}）`));
+    const titleLabel = formatDisplayLabel(row.remark, row.nickname) || row.sender_id;
+    const titleNode = el('strong', '', titleLabel);
+    titleNode.title = row.sender_id;
+    heading.append(titleNode);
     const badges = el('div', 'chip-row');
-    for (const tag of row.tags || []) badges.append(el('span', 'chip chip-ok', tag));
-    if (row.bloated) badges.append(el('span', 'chip chip-warn', `碎片 ${row.memory_count} 条`));
-    else if (row.memory_count) badges.append(el('span', 'chip chip-muted', `${row.memory_count} 条资料`));
+    if (isGroup) badges.append(el('span', 'chip chip-group', '群聊'));
+    if (!isGroup) {
+      for (const tag of row.tags || []) badges.append(el('span', 'chip chip-ok', tag));
+      if (row.bloated) badges.append(el('span', 'chip chip-warn', `碎片 ${row.memory_count} 条`));
+      else if (row.memory_count) badges.append(el('span', 'chip chip-muted', `${row.memory_count} 条资料`));
+    }
     if (badges.childElementCount) heading.append(badges);
     info.append(heading);
     info.append(el('div', 'sender-meta', `${row.sender_id} · ${row.account_id} · ${row.message_count} 条消息 · 最近 ${shortTime(row.last_seen)}`));
@@ -366,7 +449,7 @@ function renderSenders() {
     const editor = el('div', 'sender-editor');
     const input = el('input', 'sender-input');
     input.type = 'text'; input.maxLength = 120; input.value = row.remark;
-    input.placeholder = '人工备注，例如：表弟 / 同事';
+    input.placeholder = isGroup ? '群聊备注名，例如：家人群 / 项目群' : '人工备注，例如：表弟 / 同事';
     input.setAttribute('aria-label', `设置 ${row.nickname || row.sender_id} 的 Remark`);
     const save = el('button', 'header-button', '保存备注'); save.type = 'button';
     save.addEventListener('click', async () => {
@@ -374,6 +457,11 @@ function renderSenders() {
       try {
         const result = await mutate('/api/senders/remark', 'POST', {account_id: row.account_id, sender_id: row.sender_id, remark: input.value});
         row.remark = input.value.trim();
+        updateNameEntry(row.sender_id, row.remark, row.nickname);
+        renderChats();
+        updateSelectedChatHeader();
+        if (state.calls.length) renderCalls();
+        if (window.EchoLoomMemory?.onNamesUpdated) window.EchoLoomMemory.onNamesUpdated();
         toast(result.status === 'cleared' ? 'Remark 已清除' : 'Remark 已保存');
         renderSenders();
       } catch (error) {
@@ -385,139 +473,147 @@ function renderSenders() {
     top.append(info, editor);
     card.append(top);
 
-    const drawer = el('details', 'sender-drawer');
-    if (state.openSenders.has(pairKey)) drawer.open = true;
-    drawer.addEventListener('toggle', () => {
-      if (drawer.open) state.openSenders.add(pairKey);
-      else state.openSenders.delete(pairKey);
-    });
-    const tagCount = (row.tags || []).length;
-    const memCount = (row.memories || []).length;
-    drawer.append(el('summary', '', `展开标签与人物资料 · ${tagCount} 个标签 · ${memCount} 条资料`));
+    if (!isGroup) {
+      const drawer = el('details', 'sender-drawer');
+      if (state.openSenders.has(pairKey)) drawer.open = true;
+      drawer.addEventListener('toggle', () => {
+        if (drawer.open) state.openSenders.add(pairKey);
+        else state.openSenders.delete(pairKey);
+      });
+      const tagCount = (row.tags || []).length;
+      const memCount = (row.memories || []).length;
+      drawer.append(el('summary', '', `展开标签与人物资料 · ${tagCount} 个标签 · ${memCount} 条资料`));
 
-    const body = el('div', 'sender-drawer-body');
-    const tagSection = el('div', 'drawer-section');
-    tagSection.append(el('div', 'drawer-label', '联系人标签（每人最多 5 个）'));
-    const tagWrap = el('div', 'chip-row');
-    if ((row.tags || []).length) {
-      for (const tag of row.tags) {
-        const chip = el('span', 'chip chip-ok chip-removable');
-        chip.append(el('span', '', tag));
-        const rm = el('button', 'chip-x', '×');
-        rm.type = 'button';
-        rm.setAttribute('aria-label', `移除标签 ${tag}`);
-        rm.addEventListener('click', async () => {
-          rm.disabled = true;
-          try {
-            const res = await mutate('/api/senders/tags', 'POST', {account_id: row.account_id, sender_id: row.sender_id, action: 'remove', tags: [tag]});
-            row.tags = res.tags || [];
-            toast(`已移除标签「${tag}」`);
-            renderSenders();
-          } catch (error) {
-            toast(`操作失败：${error.message}`);
-            rm.disabled = false;
-          }
-        });
-        chip.append(rm);
-        tagWrap.append(chip);
+      const body = el('div', 'sender-drawer-body');
+      const tagSection = el('div', 'drawer-section');
+      tagSection.append(el('div', 'drawer-label', '联系人标签（每人最多 5 个）'));
+      const tagWrap = el('div', 'chip-row');
+      if ((row.tags || []).length) {
+        for (const tag of row.tags) {
+          const chip = el('span', 'chip chip-ok chip-removable');
+          chip.append(el('span', '', tag));
+          const rm = el('button', 'chip-x', '×');
+          rm.type = 'button';
+          rm.setAttribute('aria-label', `移除标签 ${tag}`);
+          rm.addEventListener('click', async () => {
+            rm.disabled = true;
+            try {
+              const res = await mutate('/api/senders/tags', 'POST', {account_id: row.account_id, sender_id: row.sender_id, action: 'remove', tags: [tag]});
+              row.tags = res.tags || [];
+              toast(`已移除标签「${tag}」`);
+              renderSenders();
+            } catch (error) {
+              toast(`操作失败：${error.message}`);
+              rm.disabled = false;
+            }
+          });
+          chip.append(rm);
+          tagWrap.append(chip);
+        }
+      } else {
+        tagWrap.append(el('span', 'meta-note', '暂无标签'));
       }
-    } else {
-      tagWrap.append(el('span', 'meta-note', '暂无标签'));
-    }
-    tagSection.append(tagWrap);
-    const tagForm = el('div', 'mini-form');
-    const tagInput = el('input', 'sender-input');
-    tagInput.type = 'text'; tagInput.maxLength = 20; tagInput.placeholder = '新增标签（例如：唯一主人、同事）';
-    const tagBtn = el('button', 'header-button', '添加标签'); tagBtn.type = 'button';
-    tagBtn.addEventListener('click', async () => {
-      const value = tagInput.value.trim();
-      if (!value) return;
-      tagBtn.disabled = true;
-      try {
-        const res = await mutate('/api/senders/tags', 'POST', {account_id: row.account_id, sender_id: row.sender_id, action: 'add', tags: [value]});
-        row.tags = res.tags || [];
-        toast(`已添加标签「${value}」`);
-        renderSenders();
-      } catch (error) {
-        toast(`添加失败：${error.message}`);
-        tagBtn.disabled = false;
-      }
-    });
-    tagForm.append(tagInput, tagBtn);
-    tagSection.append(tagForm);
-    body.append(tagSection);
-
-    const memSection = el('div', 'drawer-section');
-    memSection.append(el('div', 'drawer-label', '人物资料（sender_memories）'));
-    if ((row.memories || []).length) {
-      const memList = el('div', 'sub-list');
-      for (const mem of row.memories) {
-        const mRow = el('div', 'sub-item');
-        const mMain = el('div', 'sub-item-main');
-        const mHead = el('div', 'chip-row');
-        mHead.append(el('span', 'chip chip-muted', mem.topic), el('span', 'event-time', shortTime(mem.updated_at)));
-        mMain.append(mHead, el('div', 'sub-item-text', mem.content));
-        const delBtn = confirmButton('删除', async () => {
-          await mutate(`/api/senders/memories/${encodeURIComponent(mem.memory_id)}?${new URLSearchParams({account_id: row.account_id})}`, 'DELETE');
-          row.memories = row.memories.filter(item => item.memory_id !== mem.memory_id);
-          row.memory_count = row.memories.length;
-          row.bloated = row.memory_count >= 8;
-          toast('人物资料已删除');
+      tagSection.append(tagWrap);
+      const tagForm = el('div', 'mini-form');
+      const tagInput = el('input', 'sender-input');
+      tagInput.type = 'text'; tagInput.maxLength = 20; tagInput.placeholder = '新增标签（例如：唯一主人、同事）';
+      const tagBtn = el('button', 'header-button', '添加标签'); tagBtn.type = 'button';
+      tagBtn.addEventListener('click', async () => {
+        const value = tagInput.value.trim();
+        if (!value) return;
+        tagBtn.disabled = true;
+        try {
+          const res = await mutate('/api/senders/tags', 'POST', {account_id: row.account_id, sender_id: row.sender_id, action: 'add', tags: [value]});
+          row.tags = res.tags || [];
+          toast(`已添加标签「${value}」`);
           renderSenders();
-        });
-        mRow.append(mMain, delBtn);
-        memList.append(mRow);
+        } catch (error) {
+          toast(`添加失败：${error.message}`);
+          tagBtn.disabled = false;
+        }
+      });
+      tagForm.append(tagInput, tagBtn);
+      tagSection.append(tagForm);
+      body.append(tagSection);
+
+      const memSection = el('div', 'drawer-section');
+      memSection.append(el('div', 'drawer-label', '人物资料（sender_memories）'));
+      if ((row.memories || []).length) {
+        const memList = el('div', 'sub-list');
+        for (const mem of row.memories) {
+          const mRow = el('div', 'sub-item');
+          const mMain = el('div', 'sub-item-main');
+          const mHead = el('div', 'chip-row');
+          mHead.append(el('span', 'chip chip-muted', mem.topic), el('span', 'event-time', shortTime(mem.updated_at)));
+          mMain.append(mHead, el('div', 'sub-item-text', mem.content));
+          const delBtn = confirmButton('删除', async () => {
+            await mutate(`/api/senders/memories/${encodeURIComponent(mem.memory_id)}?${new URLSearchParams({account_id: row.account_id})}`, 'DELETE');
+            row.memories = row.memories.filter(item => item.memory_id !== mem.memory_id);
+            row.memory_count = row.memories.length;
+            row.bloated = row.memory_count >= 8;
+            toast('人物资料已删除');
+            renderSenders();
+          });
+          mRow.append(mMain, delBtn);
+          memList.append(mRow);
+        }
+        memSection.append(memList);
+      } else {
+        memSection.append(el('div', 'meta-note', '暂无沉淀的人物资料。'));
       }
-      memSection.append(memList);
-    } else {
-      memSection.append(el('div', 'meta-note', '暂无沉淀的人物资料。'));
+
+      const memForm = el('div', 'mini-form');
+      const topicSelect = el('select', '');
+      for (const topic of SENDER_TOPICS) topicSelect.append(el('option', '', topic));
+      const memInput = el('input', 'sender-input');
+      memInput.type = 'text'; memInput.maxLength = 500; memInput.placeholder = '新增人物资料（≤500字）';
+      const memBtn = el('button', 'header-button', '添加资料'); memBtn.type = 'button';
+      memBtn.addEventListener('click', async () => {
+        const content = memInput.value.trim();
+        if (!content) return;
+        memBtn.disabled = true;
+        try {
+          const res = await mutate('/api/senders/memories', 'POST', {
+            account_id: row.account_id,
+            sender_id: row.sender_id,
+            topic: topicSelect.value,
+            content,
+          });
+          toast(res.status === 'unchanged' ? '已有完全相同的资料' : '人物资料已保存');
+          await loadSenders();
+        } catch (error) {
+          toast(`保存失败：${error.message}`);
+          memBtn.disabled = false;
+        }
+      });
+      memForm.append(topicSelect, memInput, memBtn);
+      memSection.append(memForm);
+      body.append(memSection);
+
+      drawer.append(body);
+      card.append(drawer);
     }
-
-    const memForm = el('div', 'mini-form');
-    const topicSelect = el('select', '');
-    for (const topic of SENDER_TOPICS) topicSelect.append(el('option', '', topic));
-    const memInput = el('input', 'sender-input');
-    memInput.type = 'text'; memInput.maxLength = 500; memInput.placeholder = '新增人物资料（≤500字）';
-    const memBtn = el('button', 'header-button', '添加资料'); memBtn.type = 'button';
-    memBtn.addEventListener('click', async () => {
-      const content = memInput.value.trim();
-      if (!content) return;
-      memBtn.disabled = true;
-      try {
-        const res = await mutate('/api/senders/memories', 'POST', {
-          account_id: row.account_id,
-          sender_id: row.sender_id,
-          topic: topicSelect.value,
-          content,
-        });
-        toast(res.status === 'unchanged' ? '已有完全相同的资料' : '人物资料已保存');
-        await loadSenders();
-      } catch (error) {
-        toast(`保存失败：${error.message}`);
-        memBtn.disabled = false;
-      }
-    });
-    memForm.append(topicSelect, memInput, memBtn);
-    memSection.append(memForm);
-    body.append(memSection);
-
-    drawer.append(body);
-    card.append(drawer);
     list.append(card);
   }
-  if (!rows.length) list.append(el('div', 'empty', state.senders.length ? '没有匹配的人物。' : '暂无可管理的联系人。'));
+  if (!rows.length) list.append(el('div', 'empty', state.senders.length ? '没有匹配的人物或群聊。' : '暂无可管理的联系人或群聊。'));
 }
 async function loadSenders() {
   try {
     const data = await api('/api/senders');
     state.senders = data.senders || [];
+    const discovered = {};
+    for (const row of state.senders) {
+      const label = formatDisplayLabel(row.remark, row.nickname);
+      if (label) discovered[row.sender_id] = label;
+    }
+    mergeNames(discovered);
     renderSenders();
   } catch (error) {
     toast(`联系人加载失败：${error.message}`);
   }
 }
 
-window.EchoLoomUI = {$, el, clear, api, mutate, toast, shortTime, chatTitle, details, confirmButton, state};
+window.EchoLoomUI = {$, el, clear, api, mutate, toast, shortTime, displayName, chatTitle, mergeNames, details, confirmButton, state};
 
 document.querySelectorAll('.nav').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
 $('#refresh').addEventListener('click', async () => {

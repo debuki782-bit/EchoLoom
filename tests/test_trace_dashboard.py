@@ -1,16 +1,20 @@
 import asyncio
 import json
+import shutil
 import sqlite3
+import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from echoloom import tool_policy
+from echoloom.contacts import ContactIdentity
 from echoloom.event_book import EventBook
 from echoloom.memory_store import MemoryStore
 from echoloom.tool_timing import adk_function_tool
 from echoloom.toolsets import MediaToolset, MemoryToolset, ReplyToolset, WorkspaceToolset
-from echoloom.trace_dashboard import _tool_names, _transcript, create_trace_dashboard
+from echoloom.trace_dashboard import ASSETS, _tool_names, _transcript, create_trace_dashboard
 from echoloom.wechat_tools import WeChatTools
 
 
@@ -465,4 +469,223 @@ def test_dashboard_memory_search_past_300_bloat_per_model_and_sqlite_busy(tmp_pa
             json={"account_id": "wxid_bot", "sender_id": "wxid_alice", "remark": "Alice"},
             headers=headers,
         ).status_code == 503
+
+
+class _StubGateway:
+    def __init__(self, contacts: dict[str, ContactIdentity | None]):
+        self._contacts = contacts
+
+    def resolve_contact(self, user_id: str) -> ContactIdentity | None:
+        return self._contacts.get(user_id)
+
+
+def test_overview_and_memory_summary_names_resolution_and_write_through(tmp_path, monkeypatch):
+    monkeypatch.setattr(tool_policy, "POLICY_PATH", tmp_path / "controls.sqlite3")
+    memory_db = tmp_path / "agent-memory.sqlite3"
+    store = MemoryStore(memory_db)
+    store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="wxid_owner",
+        sender_id="wxid_owner",
+        raw_envelope={"msglist": [{"msgsvrid": 3001}]},
+        body_text="在吗",
+    )
+    store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="wxid_same",
+        sender_id="wxid_same",
+        raw_envelope={"msglist": [{"msgsvrid": 3002}]},
+        body_text="hi",
+    )
+    store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="wxid_cached",
+        sender_id="wxid_cached",
+        raw_envelope={"msglist": [{"msgsvrid": 3003}]},
+        body_text="离线消息",
+    )
+    store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="12345@chatroom",
+        sender_id="wxid_owner",
+        raw_envelope={"msglist": [{"msgsvrid": 3004}]},
+        body_text="群里说一句",
+    )
+    store.set_human_sender_remark(account_id="wxid_bot", sender_id="wxid_owner", remark="主人")
+    store.set_human_sender_remark(account_id="wxid_bot", sender_id="wxid_same", remark="小明")
+    store.set_human_sender_remark(account_id="wxid_bot", sender_id="12345@chatroom", remark="研发群")
+    store.upsert_contact_directory(
+        account_id="wxid_bot",
+        contact_id="wxid_cached",
+        nickname="离线好友",
+        source="hook",
+    )
+    store.close()
+
+    trace_records = [
+        {
+            "session_id": "s1",
+            "conversation_id": "wxid_trace_only",
+            "author": "model",
+            "timestamp": 1793491202,
+            "content": [{"text": "hello"}],
+        }
+    ]
+    (tmp_path / "trace.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in trace_records),
+        encoding="utf-8",
+    )
+
+    gateway = _StubGateway(
+        {
+            "wxid_owner": ContactIdentity(display_name="A.E.I.O.U.", user_name="wxid_owner", nickname="A.E.I.O.U."),
+            "wxid_same": ContactIdentity(display_name="小明", user_name="wxid_same", nickname="小明"),
+            "wxid_cached": None,
+            "wxid_trace_only": ContactIdentity(display_name="实时好友", user_name="wxid_trace_only", nickname="实时好友"),
+            "12345@chatroom": None,
+        }
+    )
+    app = create_trace_dashboard(tmp_path, gateway=gateway, memory_db_path=memory_db)
+    with TestClient(app, base_url="http://127.0.0.1:8767") as client:
+        overview = client.get("/api/overview").json()
+        names = overview["names"]
+        assert names["wxid_owner"] == "主人（A.E.I.O.U.）"
+        assert names["wxid_same"] == "小明"
+        assert names["wxid_cached"] == "离线好友"
+        assert names["wxid_trace_only"] == "实时好友"
+        assert names["12345@chatroom"] == "研发群"
+
+        summary = client.get("/api/memory/summary", params={"account_id": "wxid_bot"}).json()
+        assert summary["names"]["wxid_owner"] == "主人（A.E.I.O.U.）"
+        assert summary["names"]["wxid_cached"] == "离线好友"
+        assert summary["names"]["12345@chatroom"] == "研发群"
+
+    verify_store = MemoryStore(memory_db)
+    cached_map = verify_store.contact_directory_map(account_id="wxid_bot")
+    verify_store.close()
+    assert cached_map["wxid_owner"]["nickname"] == "A.E.I.O.U."
+    assert cached_map["wxid_trace_only"]["nickname"] == "实时好友"
+
+
+def test_senders_lists_chatrooms_and_saves_group_remark(tmp_path, monkeypatch):
+    monkeypatch.setattr(tool_policy, "POLICY_PATH", tmp_path / "controls.sqlite3")
+    memory_db = tmp_path / "agent-memory.sqlite3"
+    store = MemoryStore(memory_db)
+    store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="wxid_alice",
+        sender_id="wxid_alice",
+        raw_envelope={"msglist": [{"msgsvrid": 4001}]},
+        body_text="私聊消息",
+    )
+    store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="99999@chatroom",
+        sender_id="wxid_bob",
+        raw_envelope={"msglist": [{"msgsvrid": 4002}]},
+        body_text="群聊消息",
+    )
+    store.upsert_contact_directory(
+        account_id="wxid_bot",
+        contact_id="wxid_bob",
+        nickname="缓存鲍勃",
+        source="hook",
+    )
+    store.close()
+
+    gateway = _StubGateway(
+        {
+            "wxid_alice": ContactIdentity(display_name="爱丽丝", user_name="wxid_alice", nickname="爱丽丝"),
+            "wxid_bob": None,
+            "99999@chatroom": None,
+        }
+    )
+    app = create_trace_dashboard(tmp_path, gateway=gateway, memory_db_path=memory_db)
+    headers = {"origin": "http://127.0.0.1:8767", "x-dashboard": "1"}
+    with TestClient(app, base_url="http://127.0.0.1:8767") as client:
+        rows = client.get("/api/senders").json()["senders"]
+        by_id = {row["sender_id"]: row for row in rows}
+        assert by_id["wxid_alice"]["is_group"] is False
+        assert by_id["wxid_alice"]["nickname"] == "爱丽丝"
+        assert by_id["wxid_bob"]["is_group"] is False
+        assert by_id["wxid_bob"]["nickname"] == "缓存鲍勃"
+
+        group = by_id["99999@chatroom"]
+        assert group["is_group"] is True
+        assert group["nickname"] == ""
+        assert group["remark"] == ""
+        assert group["tags"] == []
+        assert group["memories"] == []
+        assert group["memory_count"] == 0
+        assert group["bloated"] is False
+        assert group["message_count"] == 1
+
+        res = client.post(
+            "/api/senders/remark",
+            json={"account_id": "wxid_bot", "sender_id": "99999@chatroom", "remark": "后端群"},
+            headers=headers,
+        )
+        assert res.status_code == 200
+        rows_after = client.get("/api/senders").json()["senders"]
+        group_after = next(row for row in rows_after if row["sender_id"] == "99999@chatroom")
+        assert group_after["remark"] == "后端群"
+        assert group_after["is_group"] is True
+
+        overview = client.get("/api/overview").json()
+        assert overview["names"]["99999@chatroom"] == "后端群"
+
+
+def test_transcript_parses_old_and_new_sender_formats_and_ignores_quote_body():
+    rows = [
+        {
+            "session_id": "s1",
+            "conversation_id": "wxid_a",
+            "author": "user",
+            "timestamp": 1,
+            "content": [
+                {
+                    "text": (
+                        "【历史会话内容开始】\n"
+                        "旧发送人：*{历史旧消息}*\n"
+                        "本轮聊天记录：\n"
+                        "[消息ID：m1；2026-11-27 20:00\n"
+                        "wxid_a | 主人（A.E.I.O.U.）：*{旧格式消息}*\n"
+                        "引用快照：*{旧引用快照}*]\n"
+                        "[消息ID：m2；2026-11-27 20:01\n"
+                        "主人（A.E.I.O.U.）：*{新格式第一行\n新格式第二行}*\n"
+                        "引用消息（未匹配到消息库原记录）：\n"
+                        "引用发送人 ID：wxid_b\n"
+                        "引用来源聊天 ID：wxid_a\n"
+                        "引用正文：*{被引用正文不应拆成气泡}*]\n"
+                        "[消息ID：m3；2026-11-27 20:02\n"
+                        "Agent：*{助手历史回复}*]"
+                    )
+                }
+            ],
+        }
+    ]
+    entries = _transcript(rows)
+    assert entries[0]["messages"] == [
+        {"sender": "wxid_a | 主人（A.E.I.O.U.）", "text": "旧格式消息"},
+        {"sender": "主人（A.E.I.O.U.）", "text": "新格式第一行\n新格式第二行"},
+        {"sender": "Agent", "text": "助手历史回复"},
+    ]
+
+
+def test_dashboard_static_js_syntax_and_csp():
+    index_html = (ASSETS / "index.html").read_text(encoding="utf-8")
+    assert "style=" not in index_html
+    assert "onclick=" not in index_html
+    node_bin = shutil.which("node")
+    if node_bin is not None:
+        for script_name in ("app.js", "memory.js"):
+            script_path = Path(ASSETS) / script_name
+            proc = subprocess.run(
+                [node_bin, "--check", str(script_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert proc.returncode == 0, f"{script_name} syntax check failed: {proc.stderr}"
+
 

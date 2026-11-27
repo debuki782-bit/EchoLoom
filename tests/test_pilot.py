@@ -508,8 +508,12 @@ def test_pilot_resolves_sender_and_quoted_author_by_stable_id(tmp_path: Path):
         assert context.identities["wxid_author"].display_name == "引用作者"
         assert set(looked_up) == {"wxid_member", "wxid_author", "room@chatroom"}
         serialized = context.model_user_content()
-        assert "room@chatroom" in serialized
-        assert "wxid_member" in serialized and "wxid_author" in serialized
+        session = context.model_session_context()
+        references = context.model_reference_context()
+        assert "（消息发送者）：*{回应}*" in serialized
+        assert "引用发送人：引用作者\n引用来源聊天：测试群名\n引用正文：*{原消息}*" in serialized
+        assert "room@chatroom" in session
+        assert "wxid_member" in references and "wxid_author" in references
         assert "不可信别名" not in serialized
         pilot.db.close()
 

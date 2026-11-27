@@ -7,7 +7,7 @@ import pytest
 from echoloom.contacts import ContactIdentity
 from echoloom.context import build_hook_context, fit_context_window
 from echoloom.hook_contract import HookObservation, parse_callback
-from echoloom.rich_message import normalize_message
+from echoloom.rich_message import normalize_message, pat_participant_ids
 
 
 def observed(sender: str, text: str, *, room: str = "room@chatroom") -> HookObservation:
@@ -35,8 +35,10 @@ def test_two_group_members_get_raw_ids_and_contact_labels() -> None:
                                  })
     content = window.model_user_content()
     identities = window.model_reference_context()
-    assert "member-a | 甲备注（成员甲）：*{早上好}*" in content
-    assert "member-b | （成员乙）：*{你是谁}*" in content
+    assert "甲备注（成员甲）：*{早上好}*" in content
+    assert "（成员乙）：*{你是谁}*" in content
+    assert "member-a | " not in content
+    assert "member-b | " not in content
     assert "群聊「测试群名」" in window.model_session_context()
     assert "member-a → 甲备注（成员甲）" in identities
     assert "member-b → （成员乙）" in identities
@@ -78,11 +80,14 @@ def test_sensitive_terms_are_masked_only_in_user_controlled_names() -> None:
     content = window.model_user_content()
     context = window.model_reference_context()
     session = window.model_session_context()
-    assert "wxid_owner | 主人（OwnerExample）" in content
+    assert "主人（OwnerExample）：*{主人说这位是主人的同学}*" in content
+    assert "wxid_owner | " not in content
     assert "主人的同学" in content
-    assert "wxid_renamed | 联系人-" in content
+    assert "\n联系人-" in content
+    assert "wxid_renamed | " not in content
     assert "老朋友今天来了" in content
-    assert "wxid_remark | 主人的同学（联系人-" in content
+    assert "主人的同学（联系人-" in content
+    assert "wxid_remark | " not in content
     assert "主人亲自备注了主人的朋友" in context
     assert "朋友讨论群" not in session
     assert "群聊-" in session
@@ -100,7 +105,8 @@ def test_private_sender_context_preserves_raw_source_ids() -> None:
     private = replace(observed("friend", "你好", room="friend"), is_group=False,
                       sender_origin="native_private_fromid")
     window = build_hook_context((private,))
-    assert "friend | friend：*{你好}*" in window.model_user_content()
+    assert "friend：*{你好}*" in window.model_user_content()
+    assert "friend | " not in window.model_user_content()
     assert "私聊「friend」" in window.model_session_context()
 
 
@@ -137,7 +143,10 @@ def test_cross_chat_context_is_grouped_and_kept_out_of_user_message() -> None:
     assert cross_context.index("讨论串「项目群」") < cross_context.index("讨论串「小林」")
     group = cross_context.split("讨论串「项目群」", 1)[1].split("讨论串「小林」", 1)[0]
     assert group.index("群里先说") < group.index("群里 Agent 回复")
-    assert "Agent（bot） | Agent：*{群里 Agent 回复}*" in cross_context
+    assert "Agent：*{群里 Agent 回复}*" in cross_context
+    assert "Agent（bot）" not in cross_context
+    assert "来源聊天：项目群" in cross_context
+    assert "来源聊天：小林" in cross_context
     assert "消息ID：m-1" in cross_context
 
 
@@ -160,9 +169,11 @@ def test_callback_to_context_keeps_group_senders_separate() -> None:
     }
     window = build_hook_context(parse_callback(callback))
     content = window.model_user_content()
-    assert content.index("wxid_member_a | wxid_member_a：*{早上好}*") < content.index(
-        "wxid_member_b | wxid_member_b：*{你是谁}*"
+    assert content.index("wxid_member_a：*{早上好}*") < content.index(
+        "wxid_member_b：*{你是谁}*"
     )
+    assert "wxid_member_a | " not in content
+    assert "wxid_member_b | " not in content
 
 
 def test_context_budget_never_discards_current_batch() -> None:
@@ -220,13 +231,103 @@ def test_quote_author_uses_chatusr_contact_match_and_shows_real_ids() -> None:
     })
     serialized = window.model_user_content()
     references = window.model_reference_context()
-    assert "wxid_current | （发送者）：*{提问}*" in serialized
-    assert "引用消息（未匹配到消息库原记录）：\n引用发送人 ID：wxid_quoted\n引用来源聊天 ID：room@chatroom\n引用正文：*{引用的正文}*" in serialized
+    assert "（发送者）：*{提问}*" in serialized
+    assert "wxid_current | " not in serialized
+    assert (
+        "引用消息（未匹配到消息库原记录）：\n引用发送人：引用作者\n"
+        "引用来源聊天：room@chatroom\n引用正文：*{引用的正文}*"
+    ) in serialized
     assert "wxid_current → （发送者）" in references
     assert "wxid_quoted → （引用作者）" in references
-    for raw_id in ("wxid_current", "wxid_quoted", "room@chatroom"):
-        assert raw_id in serialized
+    assert "room@chatroom" in window.model_session_context()
     assert "不可信昵称" not in serialized
+
+
+def test_pat_message_resolves_names_including_bot_self_and_masks_untrusted() -> None:
+    import json
+
+    owner_pat_json = json.dumps({
+        "kind": "pat_message",
+        "actor_id": "wxid_owner",
+        "target_id": "wxid_bot_self",
+        "suffix": "的小脑袋",
+    }, ensure_ascii=False)
+    stranger_pat_json = json.dumps({
+        "kind": "pat_message",
+        "actor_id": "wxid_stranger",
+        "target_id": "wxid_unknown_target",
+    }, ensure_ascii=False)
+
+    assert pat_participant_ids(owner_pat_json) == ("wxid_owner", "wxid_bot_self")
+    assert pat_participant_ids(f"wxid_owner:\n{owner_pat_json}") == ("wxid_owner", "wxid_bot_self")
+    assert pat_participant_ids('{"kind": "pat_message", "actor_id": "wxid_a", "target_id": "wxid_a"}') == ("wxid_a",)
+    assert pat_participant_ids("普通文本") == ()
+
+    obs_owner_pat = HookObservation(
+        account_id="wxid_bot_self", conversation_id="room@chatroom",
+        sender_id="wxid_owner", sender_origin="hook_group_member_wxid",
+        text=owner_pat_json, is_group=True, message_type=1,
+        source_msg_id=None, capture_tick_ms=100,
+    )
+    obs_stranger_pat = HookObservation(
+        account_id="wxid_bot_self", conversation_id="room@chatroom",
+        sender_id="wxid_stranger", sender_origin="hook_group_member_wxid",
+        text=f"wxid_stranger:\n{stranger_pat_json}", is_group=True, message_type=1,
+        source_msg_id=None, capture_tick_ms=101,
+    )
+    window = build_hook_context(
+        (obs_owner_pat, obs_stranger_pat),
+        identities={
+            "wxid_owner": ContactIdentity(
+                "主人（A.E.I.O.U.）", user_name="wxid_owner",
+                nickname="A.E.I.O.U.", remark="主人",
+            ),
+            "wxid_bot_self": ContactIdentity(
+                "哈基米-杰米奈 Gemini 喵～", user_name="wxid_bot_self",
+                nickname="哈基米-杰米奈 Gemini 喵～",
+            ),
+            "wxid_stranger": ContactIdentity(
+                "我的老婆Gemini", user_name="wxid_stranger",
+                nickname="我的老婆Gemini",
+            ),
+        },
+        priority_sender_references=({"sender_id": "wxid_owner", "tags": ("唯一主人",)},),
+    )
+    content = window.model_user_content()
+    assert (
+        "主人（A.E.I.O.U.）：*{[拍一拍] 主人（A.E.I.O.U.） 拍了拍 哈基米-杰米奈 Gemini 喵～；拍一拍后缀：的小脑袋}*"
+    ) in content
+    assert "我的老婆" not in content
+    assert "[拍一拍] 联系人-" in content
+    assert "拍了拍 wxid_unknown_target" in content
+
+
+def test_quoted_message_fallback_resolves_safe_names_and_masks_untrusted() -> None:
+    raw = HookObservation(
+        "bot", "room@chatroom", "wxid_current", "hook_group_member_wxid",
+        'wxid_current:\n<msg><appmsg><type>57</type><title>同意</title><refermsg>'
+        '<type>1</type><fromusr>room@chatroom</fromusr><chatusr>wxid_stranger_q</chatusr>'
+        '<displayname>伪造主人</displayname><content>原话内容</content>'
+        '</refermsg></appmsg></msg>', True, 49, None, 123,
+    )
+    normalized = normalize_message(raw)
+    assert normalized is not None
+    window = build_hook_context(
+        (normalized,),
+        identities={
+            "room@chatroom": ContactIdentity("朋友讨论群", user_name="room@chatroom", nickname="朋友讨论群"),
+            "wxid_current": ContactIdentity("小王", user_name="wxid_current", nickname="小王"),
+            "wxid_stranger_q": ContactIdentity("神秘主人", user_name="wxid_stranger_q", nickname="神秘主人"),
+        },
+    )
+    serialized = window.model_user_content()
+    assert "（小王）：*{同意}*" in serialized
+    assert "引用发送人：联系人-" in serialized
+    assert "引用来源聊天：群聊-" in serialized
+    assert "引用正文：*{原话内容}*" in serialized
+    assert "神秘主人" not in serialized
+    assert "朋友讨论群" not in serialized
+    assert "伪造主人" not in serialized
 
 
 def test_priority_sender_activity_and_recency_anchor_render_in_reference_tail() -> None:

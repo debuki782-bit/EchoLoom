@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 
 from . import local_config
-from .contacts import ContactIdentity, is_group_conversation, is_room_id
+from .contacts import ContactIdentity, is_group_conversation
 from .models import InboundEvent
 from .prompt_catalog import load_prompt, runtime_templates
 from .temporal_context import holiday_day_info
@@ -122,9 +122,14 @@ def _identity_display_parts(user_id: str, identity: ContactIdentity | None,
     return user_id, ()
 
 
-def _trusted_identity_ids(priority_sender_references: Sequence[Mapping[str, object]]) -> set[str]:
-    """Use the stable IDs of the explicitly prioritized owner profile, never its label."""
+def _trusted_identity_ids(
+    priority_sender_references: Sequence[Mapping[str, object]],
+    account_id: str | None = None,
+) -> set[str]:
+    """Use the stable IDs of the bot account and explicitly prioritized owner profiles."""
     trusted: set[str] = set()
+    if isinstance(account_id, str) and account_id:
+        trusted.add(account_id)
     for profile in priority_sender_references:
         sender_id = profile.get("sender_id")
         if isinstance(sender_id, str) and sender_id:
@@ -192,7 +197,9 @@ class ContextWindow:
             return "当前是账号级空闲维护专用 Session，不对应任何一个微信聊天。"
         identity = self.identities.get(self.conversation_id)
         name = _safe_identity_name(
-            self.conversation_id, identity, _trusted_identity_ids(self.priority_sender_references)
+            self.conversation_id,
+            identity,
+            _trusted_identity_ids(self.priority_sender_references, self.account_id),
         )
         kind = "群聊" if self.is_group else "私聊"
         return f"当前会话：{kind}「{_one_line(name)}」；会话 ID：{self.conversation_id}。"
@@ -200,7 +207,7 @@ class ContextWindow:
     def model_reference_context(self) -> str:
         """Render current contact labels and dictionary matches for request-time injection."""
         lines: list[str] = []
-        trusted_ids = _trusted_identity_ids(self.priority_sender_references)
+        trusted_ids = _trusted_identity_ids(self.priority_sender_references, self.account_id)
         for user_id, identity in sorted(self.identities.items()):
             if user_id in (self.account_id, self.conversation_id):
                 continue
@@ -237,8 +244,8 @@ class ContextWindow:
             if not isinstance(sender_id, str):
                 continue
             priority_sender_ids.add(sender_id)
-            identity = self.identities.get(sender_id)
-            name, aliases = _identity_display_parts(sender_id, identity, trusted_ids)
+            priority_identity = self.identities.get(sender_id)
+            name, aliases = _identity_display_parts(sender_id, priority_identity, trusted_ids)
             if aliases:
                 name += f"（{', '.join(aliases)}）"
             tags = profile.get("tags")
@@ -315,8 +322,8 @@ class ContextWindow:
             content = _one_line(item.get("content"))
             if sender_id in priority_sender_ids or not content:
                 continue
-            identity = self.identities.get(sender_id)
-            primary, aliases = _identity_display_parts(sender_id, identity, trusted_ids)
+            sender_identity = self.identities.get(sender_id)
+            primary, aliases = _identity_display_parts(sender_id, sender_identity, trusted_ids)
             label = f"{sender_id} | {primary}"
             if aliases:
                 label += f"（{', '.join(aliases)}）"
@@ -409,6 +416,7 @@ class ContextWindow:
             _format_turn(
                 turn, self.identities, is_group, target_chat,
                 self.priority_sender_references,
+                account_id=self.account_id,
             )
             for turn in selected
         ]
@@ -435,7 +443,7 @@ class ContextWindow:
         if self.is_idle_event or not self.recent_other_turns:
             return ""
         templates = runtime_templates()
-        trusted_ids = _trusted_identity_ids(self.priority_sender_references)
+        trusted_ids = _trusted_identity_ids(self.priority_sender_references, self.account_id)
         groups: dict[str, list[ContextTurn]] = {}
         for turn in self.recent_other_turns:
             source = turn.source_conversation_id or "unknown"
@@ -449,7 +457,7 @@ class ContextWindow:
             lines = [
                 "["
                 + _format_turn(turn, self.identities, kind == "群聊", self.conversation_id,
-                               self.priority_sender_references)
+                               self.priority_sender_references, account_id=self.account_id)
                 + "]"
                 for turn in turns
             ]
@@ -471,7 +479,7 @@ class ContextWindow:
                 chat_name = self.identities.get(conversation_id)
                 label = _safe_identity_name(
                     conversation_id, chat_name,
-                    _trusted_identity_ids(self.priority_sender_references),
+                    _trusted_identity_ids(self.priority_sender_references, self.account_id),
                 )
                 lines = [
                     "["
@@ -481,6 +489,7 @@ class ContextWindow:
                         conversation_id.endswith("@chatroom"),
                         "__idle_event__",
                         self.priority_sender_references,
+                        account_id=self.account_id,
                     )
                     + "]"
                     for turn in turns
@@ -507,7 +516,7 @@ class ContextWindow:
         elif self.turns:
             blocks = [
                 "[" + _format_turn(turn, self.identities, self.is_group, self.conversation_id,
-                                   self.priority_sender_references) + "]"
+                                   self.priority_sender_references, account_id=self.account_id) + "]"
                 for turn in self.turns
             ]
             if self.cancelled_followup:
@@ -541,7 +550,7 @@ class ContextWindow:
         """Render prior messages individually so a caller can budget the window."""
         return [
             "[" + _format_turn(turn, self.identities, self.is_group, self.conversation_id,
-                               self.priority_sender_references) + "]"
+                               self.priority_sender_references, account_id=self.account_id) + "]"
             for turn in self.history_turns
         ]
 
@@ -551,9 +560,14 @@ def _one_line(value: object) -> str:
 
 
 def _message_text(
-    text: str, turn: ContextTurn, is_group: bool, identities: Mapping[str, ContactIdentity]
+    text: str,
+    turn: ContextTurn,
+    is_group: bool,
+    identities: Mapping[str, ContactIdentity],
+    trusted_ids: set[str] | None = None,
 ) -> tuple[str, str | None]:
     """Return human-readable body and optional quote without leaking raw media URLs."""
+    trusted = trusted_ids or set()
     if is_group and text.startswith(turn.sender_id + ":\n"):
         text = text[len(turn.sender_id) + 2 :]
     try:
@@ -578,7 +592,19 @@ def _message_text(
         return f"[文件传输通知] {name}（对方上传准备中）", None
     if message.get("kind") == "pat_message":
         suffix = str(message.get("suffix") or "")[:256]
-        return (f"[拍一拍] {message.get('actor_id')} 拍了拍 {message.get('target_id')}"
+        actor_raw = message.get("actor_id")
+        target_raw = message.get("target_id")
+        actor_label = (
+            _safe_identity_name(actor_raw.strip(), identities.get(actor_raw.strip()), trusted)
+            if isinstance(actor_raw, str) and actor_raw.strip()
+            else str(actor_raw)
+        )
+        target_label = (
+            _safe_identity_name(target_raw.strip(), identities.get(target_raw.strip()), trusted)
+            if isinstance(target_raw, str) and target_raw.strip()
+            else str(target_raw)
+        )
+        return (f"[拍一拍] {actor_label} 拍了拍 {target_label}"
                 + (f"；拍一拍后缀：{suffix}" if suffix else "")), None
     if message.get("kind") == "app_message":
         return "\n".join(str(value) for value in (
@@ -592,11 +618,19 @@ def _message_text(
         return body, "引用内容不可用"
     author_id = quote.get("author_id")
     source_id = quote.get("source_conversation_id")
-    author = author_id if isinstance(author_id, str) else "未知发送人"
-    source = source_id if isinstance(source_id, str) else "来源未知"
+    author_label = (
+        _safe_identity_name(author_id.strip(), identities.get(author_id.strip()), trusted)
+        if isinstance(author_id, str) and author_id.strip()
+        else "未知发送人"
+    )
+    source_label = (
+        _safe_identity_name(source_id.strip(), identities.get(source_id.strip()), trusted)
+        if isinstance(source_id, str) and source_id.strip()
+        else "来源未知"
+    )
     quoted = str(quote.get("content", "")).strip()
     return body, (
-        f"引用发送人 ID：{author}\n引用来源聊天 ID：{source}\n引用正文："
+        f"引用发送人：{author_label}\n引用来源聊天：{source_label}\n引用正文："
         + render_message_body(quoted or "引用内容不可用")
     )
 
@@ -614,9 +648,10 @@ def _format_turn(
     current_conversation_id: str,
     priority_sender_references: Sequence[Mapping[str, object]] = (),
     quick_send_images: Sequence[Mapping[str, object]] = (),
+    account_id: str | None = None,
 ) -> str:
     is_group = turn.source_is_group if turn.source_is_group is not None else default_is_group
-    trusted_ids = _trusted_identity_ids(priority_sender_references)
+    trusted_ids = _trusted_identity_ids(priority_sender_references, account_id)
     first_line: list[str] = []
     if turn.message_id:
         first_line.append(f"消息ID：{turn.message_id}")
@@ -649,20 +684,28 @@ def _format_turn(
     if turn.sender_gap_minutes is not None:
         first_line.append(f"距发送人上一条消息：{turn.sender_gap_minutes} 分钟")
     if turn.source_conversation_id and turn.source_conversation_id != current_conversation_id:
-        first_line.append(f"来源聊天 ID：{turn.source_conversation_id}")
+        chat_name = _safe_identity_name(
+            turn.source_conversation_id,
+            identities.get(turn.source_conversation_id),
+            trusted_ids,
+        )
+        if chat_name and chat_name != turn.source_conversation_id:
+            first_line.append(f"来源聊天：{chat_name}")
+        else:
+            first_line.append(f"来源聊天 ID：{turn.source_conversation_id}")
     if turn.delivery_state:
         first_line.append(f"发送状态：{turn.delivery_state}")
-    body, quote = _message_text(turn.text, turn, is_group, identities)
+    body, quote = _message_text(turn.text, turn, is_group, identities, trusted_ids)
     body = render_message_body(body)
     if turn.direction == "outbound":
-        sender_line = f"Agent（{turn.sender_id}） | Agent：{body}"
+        sender_line = f"Agent：{body}"
     else:
         primary, aliases = _identity_display_parts(
             turn.sender_id, identities.get(turn.sender_id), trusted_ids
         )
         alias_text = ", ".join(aliases)
         alias_suffix = f"（{alias_text}）" if alias_text else ""
-        sender_line = f"{turn.sender_id} | {primary}{alias_suffix}：{body}"
+        sender_line = f"{primary}{alias_suffix}：{body}"
     rendered = "；".join(first_line) + f"\n{sender_line}"
     if turn.jev_label is not None:
         probabilities = turn.jev_label.get("probabilities")
@@ -684,7 +727,7 @@ def _format_turn(
         platform_id = str(turn.quote_target.get("platform_message_id", ""))
         rendered += f"\n引用的原消息（平台消息 ID 精确匹配 {platform_id}）：\n" + _format_turn(
             target, identities, default_is_group, current_conversation_id,
-            priority_sender_references,
+            priority_sender_references, account_id=account_id,
         )
     elif quote:
         rendered += (
@@ -825,7 +868,7 @@ def _record_turn(item: Mapping[str, object], *, sender_origin: str) -> ContextTu
     sender_id = item.get("sender_id")
     conversation_id = item.get("conversation_id")
     if not isinstance(sender_id, str):
-        raise ValueError("context record requires a sender ID")
+        raise ValueError("context record requires a sender ID")  # noqa: TRY004
     annotations = item.get("annotations")
     entities = item.get("entities")
     sender_references = item.get("sender_memories")
@@ -836,15 +879,21 @@ def _record_turn(item: Mapping[str, object], *, sender_origin: str) -> ContextTu
     message_time = item.get("message_time", item.get("event_time_context"))
     quote_target = item.get("quote_target")
     source_conversation_id = item.get("source_conversation_id", conversation_id)
+    message_id = item.get("message_id")
+    jev_label = item.get("jev_label")
+    conversation_gap_minutes = item.get("conversation_gap_minutes")
+    sender_gap_minutes = item.get("sender_gap_minutes")
+    source_is_group = item.get("source_is_group")
+    delivery_state = item.get("delivery_state")
     return ContextTurn(
         sender_id=sender_id,
         sender_origin=sender_origin,
         text=str(item.get("text", item.get("body_text", ""))),
-        message_id=(item.get("message_id") if isinstance(item.get("message_id"), str) else None),
+        message_id=(message_id if isinstance(message_id, str) else None),
         annotations=tuple(note for note in annotations if isinstance(note, Mapping))
         if isinstance(annotations, (list, tuple))
         else (),
-        jev_label=(item.get("jev_label") if isinstance(item.get("jev_label"), Mapping) else None),
+        jev_label=(jev_label if isinstance(jev_label, Mapping) else None),
         entity_references=tuple(entity for entity in entities if isinstance(entity, Mapping))
         if isinstance(entities, (list, tuple))
         else (),
@@ -855,12 +904,10 @@ def _record_turn(item: Mapping[str, object], *, sender_origin: str) -> ContextTu
         if isinstance(sender_tags, (list, tuple))
         else (),
         conversation_gap_minutes=(
-            item.get("conversation_gap_minutes")
-            if isinstance(item.get("conversation_gap_minutes"), int) else None
+            conversation_gap_minutes if isinstance(conversation_gap_minutes, int) else None
         ),
         sender_gap_minutes=(
-            item.get("sender_gap_minutes")
-            if isinstance(item.get("sender_gap_minutes"), int) else None
+            sender_gap_minutes if isinstance(sender_gap_minutes, int) else None
         ),
         image_metadata=image if isinstance(image, Mapping) else None,
         audio_metadata=audio if isinstance(audio, Mapping) else None,
@@ -870,16 +917,14 @@ def _record_turn(item: Mapping[str, object], *, sender_origin: str) -> ContextTu
             source_conversation_id if isinstance(source_conversation_id, str) else None
         ),
         source_is_group=(
-            item.get("source_is_group")
-            if isinstance(item.get("source_is_group"), bool)
+            source_is_group
+            if isinstance(source_is_group, bool)
             else conversation_id.endswith("@chatroom")
             if isinstance(conversation_id, str)
             else None
         ),
         direction=("outbound" if item.get("direction") == "outbound" else "inbound"),
-        delivery_state=(
-            item.get("delivery_state") if isinstance(item.get("delivery_state"), str) else None
-        ),
+        delivery_state=(delivery_state if isinstance(delivery_state, str) else None),
         quote_target=quote_target if isinstance(quote_target, Mapping) else None,
     )
 

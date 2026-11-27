@@ -30,6 +30,15 @@ def _bounded_text(value: str, limit: int) -> str:
     return value
 
 
+def _optional_bounded_text(value: str, limit: int) -> str:
+    if not isinstance(value, str):
+        raise TypeError("text must be a string")
+    cleaned = value.strip()
+    if len(cleaned) > limit or "\0" in cleaned:
+        raise ValueError("text exceeds its limit")
+    return cleaned
+
+
 def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -664,6 +673,172 @@ class KnowledgeRepo:
                 (account_id, *identifiers),
             ).fetchall()
         return {str(row["sender_id"]): str(row["remark"]) for row in rows}
+
+    def all_sender_remarks(self, *, account_id: str) -> dict[str, str]:
+        """Return all active human-owned remarks for an account."""
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT sender_id,remark FROM sender_profiles "
+                "WHERE account_id=? AND state='active'",
+                (account_id,),
+            ).fetchall()
+        return {str(row["sender_id"]): str(row["remark"]) for row in rows}
+
+    def _upsert_contact_directory_row(
+        self,
+        *,
+        account_id: str,
+        contact_id: str,
+        nickname: str,
+        alias: str,
+        source: str,
+        now: str,
+    ) -> bool:
+        existing = self.db.execute(
+            "SELECT nickname,alias,source FROM contact_directory "
+            "WHERE account_id=? AND contact_id=?",
+            (account_id, contact_id),
+        ).fetchone()
+        if existing is None:
+            self.db.execute(
+                "INSERT INTO contact_directory("
+                "account_id,contact_id,nickname,alias,source,updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (account_id, contact_id, nickname, alias, source, now),
+            )
+            return True
+        cur_nickname = str(existing["nickname"])
+        cur_alias = str(existing["alias"])
+        cur_source = str(existing["source"])
+        next_nickname = nickname or cur_nickname
+        next_alias = alias or cur_alias
+        if next_nickname == cur_nickname and next_alias == cur_alias and source == cur_source:
+            return False
+        self.db.execute(
+            "UPDATE contact_directory "
+            "SET nickname=?,alias=?,source=?,updated_at=? "
+            "WHERE account_id=? AND contact_id=?",
+            (next_nickname, next_alias, source, now, account_id, contact_id),
+        )
+        return True
+
+    def upsert_contact_directory(
+        self,
+        *,
+        account_id: str,
+        contact_id: str,
+        nickname: str,
+        alias: str = "",
+        source: str = "hook",
+    ) -> bool:
+        """Insert or update a cached contact nickname/alias without clobbering with blanks."""
+        if not isinstance(account_id, str) or not isinstance(contact_id, str):
+            raise TypeError("account_id and contact_id must be strings")
+        account_id = _bounded_text(account_id, 256)
+        contact_id = _bounded_text(contact_id, 256)
+        nickname = _optional_bounded_text(nickname, 256)
+        alias = _optional_bounded_text(alias, 256)
+        source_clean = _optional_bounded_text(source, 64) or "hook"
+        if not nickname and not alias:
+            return False
+        now = _now()
+        with self._transaction():
+            return self._upsert_contact_directory_row(
+                account_id=account_id,
+                contact_id=contact_id,
+                nickname=nickname,
+                alias=alias,
+                source=source_clean,
+                now=now,
+            )
+
+    def upsert_contact_directory_batch(
+        self, *, account_id: str, entries: Sequence[tuple[str, str, str]]
+    ) -> int:
+        """Batch-upsert `(contact_id, nickname, source)` entries in one transaction."""
+        if not isinstance(account_id, str):
+            raise TypeError("account_id must be a string")
+        account_id = _bounded_text(account_id, 256)
+        deduped: dict[str, tuple[str, str]] = {}
+        for entry in entries:
+            if len(entry) != 3:
+                continue
+            raw_contact_id, raw_nickname, raw_source = entry
+            if not isinstance(raw_contact_id, str) or not isinstance(raw_nickname, str):
+                continue
+            contact_id = raw_contact_id.strip()
+            nickname = raw_nickname.strip()
+            if (
+                not contact_id
+                or len(contact_id) > 256
+                or "\0" in contact_id
+                or not nickname
+                or len(nickname) > 256
+                or "\0" in nickname
+            ):
+                continue
+            if not isinstance(raw_source, str):
+                continue
+            source = raw_source.strip() or "hook"
+            if len(source) > 64 or "\0" in source:
+                continue
+            deduped[contact_id] = (nickname, source)
+        if not deduped:
+            return 0
+        now = _now()
+        changed = 0
+        with self._transaction():
+            for contact_id, (nickname, source) in deduped.items():
+                if self._upsert_contact_directory_row(
+                    account_id=account_id,
+                    contact_id=contact_id,
+                    nickname=nickname,
+                    alias="",
+                    source=source,
+                    now=now,
+                ):
+                    changed += 1
+        return changed
+
+    def contact_directory_map(
+        self, *, account_id: str, contact_ids: Sequence[str] | None = None
+    ) -> dict[str, dict[str, str]]:
+        """Read cached contact directory rows for an account (all or filtered by IDs)."""
+        rows: list[sqlite3.Row] = []
+        if contact_ids is None:
+            with self._lock:
+                rows = self.db.execute(
+                    "SELECT contact_id,nickname,alias,source,updated_at "
+                    "FROM contact_directory WHERE account_id=?",
+                    (account_id,),
+                ).fetchall()
+        else:
+            identifiers = list(
+                dict.fromkeys(cid for cid in contact_ids if isinstance(cid, str) and cid)
+            )
+            if not identifiers:
+                return {}
+            with self._lock:
+                for start in range(0, len(identifiers), 500):
+                    chunk = identifiers[start : start + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows.extend(
+                        self.db.execute(
+                            "SELECT contact_id,nickname,alias,source,updated_at "
+                            "FROM contact_directory WHERE account_id=? "
+                            f"AND contact_id IN ({placeholders})",
+                            (account_id, *chunk),
+                        ).fetchall()
+                    )
+        return {
+            str(row["contact_id"]): {
+                "nickname": str(row["nickname"]),
+                "alias": str(row["alias"]),
+                "source": str(row["source"]),
+                "updated_at": str(row["updated_at"]),
+            }
+            for row in rows
+        }
 
     def set_human_sender_remark(
         self,

@@ -179,11 +179,45 @@ def normalized_image_reference_records(normalized_text: str) -> tuple[dict[str, 
                  and isinstance(ref.get("value"), str))
 
 
-def quoted_author_id(normalized_text: str) -> str | None:
+def _unwrap_json_payload(text: str) -> object:
+    if not isinstance(text, str):
+        return None
+    candidate = text.lstrip()
+    if not candidate.startswith("{"):
+        sep = text.find(":\n")
+        if sep <= 0:
+            return None
+        prefix = text[:sep].strip()
+        tail = text[sep + 2 :].lstrip()
+        if not prefix or len(prefix) > 256 or "\n" in prefix or not tail.startswith("{"):
+            return None
+        candidate = tail
     try:
-        message = json.loads(normalized_text)
+        return json.loads(candidate)
     except (json.JSONDecodeError, TypeError):
         return None
+
+
+def pat_participant_ids(text: str) -> tuple[str, ...]:
+    """Extract actor_id and target_id from a normalized pat_message payload."""
+    message = _unwrap_json_payload(text)
+    if not isinstance(message, dict) or message.get("kind") != "pat_message":
+        return ()
+    ids: list[str] = []
+    for key in ("actor_id", "target_id"):
+        val = message.get(key)
+        if not isinstance(val, str):
+            continue
+        cleaned = val.strip()
+        if not cleaned or len(cleaned) > 256 or "\0" in cleaned or "\n" in cleaned:
+            continue
+        if (is_contact_id(cleaned) or ":" in cleaned or "@" not in cleaned) and cleaned not in ids:
+            ids.append(cleaned)
+    return tuple(ids)
+
+
+def quoted_author_id(normalized_text: str) -> str | None:
+    message = _unwrap_json_payload(normalized_text)
     if not isinstance(message, dict) or message.get("kind") != "quoted_message":
         return None
     quote = message.get("quote")
@@ -196,10 +230,7 @@ def quoted_author_id(normalized_text: str) -> str | None:
 
 
 def quoted_message_reference(normalized_text: str) -> dict[str, str] | None:
-    try:
-        message = json.loads(normalized_text)
-    except (json.JSONDecodeError, TypeError):
-        return None
+    message = _unwrap_json_payload(normalized_text)
     if not isinstance(message, dict) or message.get("kind") != "quoted_message":
         return None
     quote = message.get("quote")

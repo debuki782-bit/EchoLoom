@@ -58,7 +58,7 @@ def test_raw_message_roundtrip_and_notes_are_separate_versioned_untrusted_data(t
         "annotations": store.notes_for_message(account_id=event.account_id,
                                                  message_id=archived.message_id),
     }]).model_user_content()
-    assert "wxid_member | wxid_member：*{原始消息正文}*" in context
+    assert "wxid_member：*{原始消息正文}*" in context
     assert "已更正：会议在周六。" in context
     assert "untrusted_annotation" not in context
     assert "已更正：会议在周六。" in context
@@ -579,5 +579,170 @@ def test_memory_store_enables_busy_timeout_and_wal(tmp_path):
     try:
         assert int(store.db.execute("PRAGMA busy_timeout").fetchone()[0]) == 5000
         assert str(store.db.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
+    finally:
+        store.close()
+
+
+def test_contact_directory_upsert_batch_lookup_and_non_empty_preservation(tmp_path):
+    store = MemoryStore(tmp_path / "contact-directory.sqlite3")
+    try:
+        # Insert new contact
+        assert store.upsert_contact_directory(
+            account_id="wxid_bot",
+            contact_id="wxid_alice",
+            nickname="  Alice  ",
+            alias="alice_wx",
+            source="hook",
+        ) is True
+        # Idempotent repeat returns False
+        assert store.upsert_contact_directory(
+            account_id="wxid_bot",
+            contact_id="wxid_alice",
+            nickname="Alice",
+            alias="alice_wx",
+            source="hook",
+        ) is False
+        # Empty nickname + empty alias returns False and preserves cached values
+        assert store.upsert_contact_directory(
+            account_id="wxid_bot",
+            contact_id="wxid_alice",
+            nickname="   ",
+            alias="",
+            source="hook",
+        ) is False
+        # Rename updates nickname while preserving existing non-empty alias
+        assert store.upsert_contact_directory(
+            account_id="wxid_bot",
+            contact_id="wxid_alice",
+            nickname="Alice Renamed",
+            alias="",
+            source="hook",
+        ) is True
+        # Empty nickname with new alias updates alias while preserving nickname
+        assert store.upsert_contact_directory(
+            account_id="wxid_bot",
+            contact_id="wxid_alice",
+            nickname="",
+            alias="alice_new",
+            source="hook",
+        ) is True
+
+        # Validation rejects empty/overlong/null-byte IDs or overlong/null-byte names
+        with pytest.raises(ValueError):
+            store.upsert_contact_directory(
+                account_id="", contact_id="wxid_alice", nickname="Alice",
+            )
+        with pytest.raises(ValueError):
+            store.upsert_contact_directory(
+                account_id="wxid_bot", contact_id="wxid\0bad", nickname="Alice",
+            )
+        with pytest.raises(ValueError):
+            store.upsert_contact_directory(
+                account_id="wxid_bot", contact_id="wxid_alice", nickname="x" * 257,
+            )
+
+        # Batch upsert skips invalid/empty entries and preserves existing alias
+        changed = store.upsert_contact_directory_batch(
+            account_id="wxid_bot",
+            entries=[
+                ("wxid_alice", "Alice Batch", "dashboard"),
+                ("wxid_bob", "Bob", "hook"),
+                ("wxid_empty", "   ", "hook"),
+                ("", "NoId", "hook"),
+                ("wxid_null\0", "NullId", "hook"),
+                ("wxid_overlong", "a" * 257, "hook"),
+            ],
+        )
+        assert changed == 2
+        # Repeating the same batch makes zero changes
+        assert store.upsert_contact_directory_batch(
+            account_id="wxid_bot",
+            entries=[
+                ("wxid_alice", "Alice Batch", "dashboard"),
+                ("wxid_bob", "Bob", "hook"),
+            ],
+        ) == 0
+
+        # Account isolation
+        assert store.upsert_contact_directory(
+            account_id="wxid_other_bot",
+            contact_id="wxid_bob",
+            nickname="Other Bob",
+            source="hook",
+        ) is True
+
+        # contact_directory_map: empty sequence -> {}, filtered -> subset, None -> all for account
+        assert store.contact_directory_map(account_id="wxid_bot", contact_ids=[]) == {}
+        filtered = store.contact_directory_map(
+            account_id="wxid_bot", contact_ids=["wxid_alice", "wxid_missing"],
+        )
+        assert list(filtered.keys()) == ["wxid_alice"]
+        assert filtered["wxid_alice"]["nickname"] == "Alice Batch"
+        assert filtered["wxid_alice"]["alias"] == "alice_new"
+        assert filtered["wxid_alice"]["source"] == "dashboard"
+        assert filtered["wxid_alice"]["updated_at"]
+
+        all_rows = store.contact_directory_map(account_id="wxid_bot", contact_ids=None)
+        assert set(all_rows.keys()) == {"wxid_alice", "wxid_bob"}
+        assert all_rows["wxid_bob"]["nickname"] == "Bob"
+    finally:
+        store.close()
+
+
+def test_all_sender_remarks_and_chatroom_conversation_remark(tmp_path):
+    store = MemoryStore(tmp_path / "remarks-all.sqlite3")
+    try:
+        _, event = _callback()
+        store.archive_message(
+            account_id=event.account_id,
+            conversation_id=event.conversation_id,
+            sender_id=event.sender_id,
+            raw_envelope=json.loads(event.raw_envelope_json),
+            source_record=json.loads(event.raw_message_json),
+            body_text=event.text,
+        )
+        store.archive_message(
+            account_id=event.account_id,
+            conversation_id="wxid_friend",
+            sender_id="wxid_friend",
+            raw_envelope={"msg": "hi"},
+            body_text="hi",
+        )
+        store.archive_message(
+            account_id="wxid_other_bot",
+            conversation_id="other@chatroom",
+            sender_id="wxid_other_member",
+            raw_envelope={"msg": "other"},
+            body_text="other",
+        )
+
+        # Remark on both individual sender_id and @chatroom conversation_id
+        assert store.set_human_sender_remark(
+            account_id=event.account_id, sender_id=event.sender_id, remark="群友甲",
+        ) == {"status": "saved", "version": 1}
+        assert store.set_human_sender_remark(
+            account_id=event.account_id,
+            sender_id=event.conversation_id,
+            remark="核心测试群",
+        ) == {"status": "saved", "version": 1}
+        assert store.set_human_sender_remark(
+            account_id=event.account_id, sender_id="wxid_friend", remark="临时好友",
+        ) == {"status": "saved", "version": 1}
+        assert store.set_human_sender_remark(
+            account_id="wxid_other_bot", sender_id="other@chatroom", remark="别的账号群",
+        ) == {"status": "saved", "version": 1}
+
+        # Clearing one remark excludes it from all_sender_remarks (state='deleted')
+        assert store.set_human_sender_remark(
+            account_id=event.account_id, sender_id="wxid_friend", remark="",
+        ) == {"status": "cleared", "version": 2}
+
+        assert store.all_sender_remarks(account_id=event.account_id) == {
+            event.sender_id: "群友甲",
+            event.conversation_id: "核心测试群",
+        }
+        assert store.all_sender_remarks(account_id="wxid_other_bot") == {
+            "other@chatroom": "别的账号群",
+        }
     finally:
         store.close()

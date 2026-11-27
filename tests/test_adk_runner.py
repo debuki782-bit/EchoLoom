@@ -55,7 +55,7 @@ def test_adk_fake_runs_and_separates_private_and_group_sessions() -> None:
         second = "\n".join(content_texts(runner.model.requests[1]))
         assert "私聊一" in first and "群聊一" not in first
         assert "群聊一" in second and "私聊一" not in second
-        assert "member | member：*{群聊一}*" in group.model_user_content()
+        assert "member：*{群聊一}*" in group.model_user_content()
 
     asyncio.run(scenario())
 

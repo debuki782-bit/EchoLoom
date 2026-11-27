@@ -1,7 +1,7 @@
 (() => {
   const ui = window.EchoLoomUI;
   if (!ui) return;
-  const {$, el, clear, api, mutate, toast, shortTime, chatTitle, confirmButton} = ui;
+  const {$, el, clear, api, mutate, toast, shortTime, displayName, chatTitle, mergeNames, confirmButton} = ui;
 
   const memState = {
     tab: 'facts',
@@ -47,8 +47,19 @@
     const list = el('div', 'provenance-list');
     for (const src of valid) {
       const box = el('div', 'provenance-item');
+      const meta = el('div', 'provenance-meta');
+      const chatSpan = el('span', '', chatTitle(src.conversation_id || ''));
+      if (src.conversation_id) chatSpan.title = src.conversation_id;
+      const senderSpan = el('span', '', displayName(src.sender_id || '') || '未知发送人');
+      if (src.sender_id) senderSpan.title = src.sender_id;
+      meta.append(
+        chatSpan,
+        document.createTextNode(' · '),
+        senderSpan,
+        document.createTextNode(` · ${shortTime(src.captured_at)} · ${src.message_id}`),
+      );
       box.append(
-        el('div', 'provenance-meta', `${chatTitle(src.conversation_id || '')} · ${src.sender_id || '未知发送人'} · ${shortTime(src.captured_at)} · ${src.message_id}`),
+        meta,
         el('div', 'provenance-body', src.body_text || '（无正文）'),
       );
       list.append(box);
@@ -66,8 +77,9 @@
     }
     sel.classList.remove('hidden');
     for (const acct of memState.accounts) {
-      const opt = el('option', '', acct);
+      const opt = el('option', '', displayName(acct) || acct);
       opt.value = acct;
+      opt.title = acct;
       if (acct === memState.accountId) opt.selected = true;
       sel.append(opt);
     }
@@ -165,6 +177,7 @@
         for (const c of convs) {
           const opt = el('option', '', `${chatTitle(c.conversation_id)}（${c.count} 条${c.bloated ? ' · 待合并' : ''}）`);
           opt.value = c.conversation_id;
+          opt.title = c.conversation_id;
           if (c.conversation_id === memState.episodeConversation) opt.selected = true;
           sel.append(opt);
         }
@@ -198,9 +211,11 @@
       defaultOpt.value = '';
       msgSelect.append(defaultOpt);
       for (const m of memState.recentMessages) {
-        const preview = `${shortTime(m.captured_at)} · ${m.sender_id}：${m.body_text.slice(0, 32)}`;
+        const senderLabel = displayName(m.sender_id) || '未知发送人';
+        const preview = `${shortTime(m.captured_at)} · ${senderLabel}：${m.body_text.slice(0, 32)}`;
         const opt = el('option', '', preview);
         opt.value = m.message_id;
+        opt.title = `${m.conversation_id || ''} / ${m.sender_id || ''} · ${m.message_id}`;
         msgSelect.append(opt);
       }
       const msgIdInput = el('input', 'sender-input');
@@ -338,7 +353,9 @@
       if (fact.in_index) titleGroup.append(el('span', 'chip chip-ok', `索引内 #${fact.index_rank}`));
       else titleGroup.append(el('span', 'chip chip-muted', '已沉底'));
       titleGroup.append(el('span', 'chip chip-muted', `v${fact.version}`));
-      titleGroup.append(el('span', 'event-time', `${fact.author_id} · ${shortTime(fact.updated_at)}`));
+      const authorTime = el('span', 'event-time', `${displayName(fact.author_id) || fact.author_id} · ${shortTime(fact.updated_at)}`);
+      if (fact.author_id) authorTime.title = fact.author_id;
+      titleGroup.append(authorTime);
 
       const actions = el('div', 'memory-actions');
       const editBtn = el('button', 'subtle-btn', memState.editingId === fact.fact_id ? '取消' : '编辑');
@@ -497,7 +514,9 @@
       const row = el('article', 'memory-row');
       const top = el('div', 'memory-row-head');
       const badges = el('div', 'chip-row');
-      badges.append(el('strong', 'entity-term', item.term), el('span', 'chip chip-muted', `v${item.version}`), el('span', 'event-time', `${item.author_id} · ${shortTime(item.updated_at)}`));
+      const entityAuthorTime = el('span', 'event-time', `${displayName(item.author_id) || item.author_id} · ${shortTime(item.updated_at)}`);
+      if (item.author_id) entityAuthorTime.title = item.author_id;
+      badges.append(el('strong', 'entity-term', item.term), el('span', 'chip chip-muted', `v${item.version}`), entityAuthorTime);
       const actions = el('div', 'memory-actions');
       const editBtn = el('button', 'subtle-btn', memState.editingId === item.entity_id ? '取消' : '编辑');
       editBtn.type = 'button';
@@ -563,10 +582,12 @@
       const row = el('article', 'memory-row');
       const top = el('div', 'memory-row-head');
       const badges = el('div', 'chip-row');
+      const noteAuthorTime = el('span', 'event-time', `${displayName(note.author_id) || note.author_id} · ${shortTime(note.updated_at)}`);
+      if (note.author_id) noteAuthorTime.title = note.author_id;
       badges.append(
         el('span', 'chip chip-muted', note.source),
         el('span', 'chip chip-muted', `v${note.version}`),
-        el('span', 'event-time', `${note.author_id} · ${shortTime(note.updated_at)}`),
+        noteAuthorTime,
       );
       const actions = el('div', 'memory-actions');
       if (note.editable) {
@@ -648,7 +669,9 @@
       const row = el('article', 'memory-row');
       const top = el('div', 'memory-row-head');
       const badges = el('div', 'chip-row');
-      badges.append(el('span', 'chip chip-muted', chatTitle(ep.conversation_id)));
+      const convBadge = el('span', 'chip chip-muted', chatTitle(ep.conversation_id));
+      if (ep.conversation_id) convBadge.title = ep.conversation_id;
+      badges.append(convBadge);
       if (ep.conversation_bloated) {
         badges.append(el('span', 'chip chip-warn', `该会话 ${ep.conversation_count} 条 · 待合并`));
       }
@@ -742,6 +765,7 @@
       memState.accounts = summary.accounts || [];
       memState.accountId = summary.account_id || '';
       memState.loaded = true;
+      if (summary.names) mergeNames(summary.names);
       renderAccountSelect();
       renderStats();
       await loadActiveTab();
@@ -807,9 +831,15 @@
         memState.summary = summary;
         memState.accounts = summary.accounts || [];
         memState.accountId = summary.account_id || '';
+        if (summary.names) mergeNames(summary.names);
         renderAccountSelect();
         renderStats();
       } catch {}
+    },
+    onNamesUpdated: () => {
+      if (!memState.loaded) return;
+      renderAccountSelect();
+      renderList();
     },
     refreshAll,
   };

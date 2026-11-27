@@ -172,6 +172,15 @@ CREATE TABLE IF NOT EXISTS message_files (
 );
 CREATE INDEX IF NOT EXISTS file_scope_time
   ON message_files(account_id,conversation_id,created_at);
+CREATE TABLE IF NOT EXISTS contact_directory (
+  account_id TEXT NOT NULL,
+  contact_id TEXT NOT NULL,
+  nickname TEXT NOT NULL DEFAULT '',
+  alias TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'hook',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (account_id, contact_id)
+);
 """
 
 

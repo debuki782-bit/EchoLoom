@@ -597,3 +597,127 @@ def test_idle_context_builder_injects_objective_delta_snapshot(tmp_path: Path):
         assert "当前判定：真·空窗期" in empty_text
     finally:
         store.close()
+
+
+def test_context_builder_collects_pat_and_quote_ids_and_uses_contact_directory_cache(
+    tmp_path: Path,
+) -> None:
+    """Write-through freshly resolved nicknames and fall back offline while remarks override."""
+    store, _ = _seed_store(tmp_path)
+    hist_pat = json.dumps(
+        {
+            "kind": "pat_message",
+            "actor_id": "wxid_hist_actor",
+            "target_id": "wxid_hist_target",
+        },
+        ensure_ascii=False,
+    )
+    hist_quote = json.dumps(
+        {
+            "kind": "quoted_message",
+            "text": "我也觉得",
+            "quote": {
+                "type": "1",
+                "platform_message_id": "9999",
+                "source_conversation_id": "quote_room@chatroom",
+                "author_id": "wxid_quote_author",
+                "content": "历史引用正文",
+            },
+        },
+        ensure_ascii=False,
+    )
+    store.archive_message(
+        account_id="wxid_bot001",
+        conversation_id="room@chatroom",
+        sender_id="wxid_hist_actor",
+        raw_envelope={"seq": 20},
+        body_text=f"wxid_hist_actor:\n{hist_pat}",
+        source_message_id=5020,
+    )
+    store.archive_message(
+        account_id="wxid_bot001",
+        conversation_id="room@chatroom",
+        sender_id="wxid_member01",
+        raw_envelope={"seq": 21},
+        body_text=hist_quote,
+        source_message_id=5021,
+    )
+
+    live_pat_obs = _obs(
+        json.dumps(
+            {
+                "kind": "pat_message",
+                "actor_id": "wxid_owner001",
+                "target_id": "wxid_bot001",
+            },
+            ensure_ascii=False,
+        ),
+        sender="wxid_owner001",
+        tick=9001,
+        original_message_type=10002,
+    )
+
+    live_contacts: dict[str, ContactIdentity] = {
+        "wxid_owner001": ContactIdentity("A.E.I.O.U.", user_name="wxid_owner001", nickname="A.E.I.O.U."),
+        "wxid_bot001": ContactIdentity(
+            "哈基米-杰米奈 Gemini 喵～",
+            user_name="wxid_bot001",
+            nickname="哈基米-杰米奈 Gemini 喵～",
+        ),
+        "wxid_member01": ContactIdentity("小组成员", user_name="wxid_member01", nickname="小组成员"),
+        "wxid_hist_actor": ContactIdentity("历史拍手", user_name="wxid_hist_actor", nickname="历史拍手"),
+        "wxid_hist_target": ContactIdentity("历史被拍", user_name="wxid_hist_target", nickname="历史被拍"),
+        "wxid_quote_author": ContactIdentity("原作者", user_name="wxid_quote_author", nickname="原作者"),
+        "room@chatroom": ContactIdentity("主测试群", user_name="room@chatroom", nickname="主测试群"),
+        "quote_room@chatroom": ContactIdentity("引用来源群", user_name="quote_room@chatroom", nickname="引用来源群"),
+    }
+
+    online_builder = ContextBuilder(store, resolve_contact=lambda uid: live_contacts.get(uid))
+    offline_builder = ContextBuilder(store, resolve_contact=lambda _uid: None)
+
+    try:
+        online_built = asyncio.run(
+            online_builder.build(ContextSpec.for_chat(observations=(live_pat_obs,)))
+        )
+        # Verify all pat & historical quote IDs were resolved and written through to contact_directory
+        for uid in (
+            "wxid_owner001",
+            "wxid_bot001",
+            "wxid_hist_actor",
+            "wxid_hist_target",
+            "wxid_quote_author",
+            "quote_room@chatroom",
+        ):
+            assert uid in online_built.context.identities
+        cached = store.contact_directory_map(
+            account_id="wxid_bot001",
+            contact_ids=list(live_contacts.keys()),
+        )
+        assert cached["wxid_bot001"]["nickname"] == "哈基米-杰米奈 Gemini 喵～"
+        assert cached["wxid_hist_target"]["nickname"] == "历史被拍"
+        assert cached["wxid_quote_author"]["nickname"] == "原作者"
+        assert cached["quote_room@chatroom"]["nickname"] == "引用来源群"
+
+        online_user = online_built.context.model_user_content()
+        assert (
+            "主人备注（A.E.I.O.U.）：*{[拍一拍] 主人备注（A.E.I.O.U.） 拍了拍 哈基米-杰米奈 Gemini 喵～}*"
+        ) in online_user
+        history_rendered = "\n".join(online_built.context.model_history_records())
+        assert "[拍一拍] 历史拍手 拍了拍 历史被拍" in history_rendered
+        assert "引用发送人：原作者\n引用来源聊天：引用来源群\n引用正文：*{历史引用正文}*" in history_rendered
+
+        # Offline fallback: resolve_contact returns None -> hydrate from contact_directory + apply remarks
+        offline_built = asyncio.run(
+            offline_builder.build(ContextSpec.for_chat(observations=(live_pat_obs,)))
+        )
+        assert offline_built.context.identities["wxid_bot001"].match_source == "contact_directory_cache"
+        assert offline_built.context.identities["wxid_bot001"].nickname == "哈基米-杰米奈 Gemini 喵～"
+        assert offline_built.context.identities["wxid_owner001"].remark == "主人备注"
+        assert offline_built.context.identities["wxid_owner001"].nickname == "A.E.I.O.U."
+        assert offline_built.context.identities["wxid_hist_target"].nickname == "历史被拍"
+        offline_user = offline_built.context.model_user_content()
+        assert (
+            "主人备注（A.E.I.O.U.）：*{[拍一拍] 主人备注（A.E.I.O.U.） 拍了拍 哈基米-杰米奈 Gemini 喵～}*"
+        ) in offline_user
+    finally:
+        store.close()

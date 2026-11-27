@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -22,6 +21,8 @@ from .dashboard_memory import (
     SENDER_BLOAT_THRESHOLD,
     register_memory_routes,
     require_local_mutation,
+    resolve_display_names,
+    resolve_live_nicknames,
     sqlite_error_guard,
 )
 from .event_book import EventBook
@@ -159,8 +160,10 @@ def _transcript(records: list[dict]) -> list[dict]:
                     extracted = [
                         {"sender": sender.strip(), "text": body}
                         for sender, body in re.findall(
-                            r"(?m)^([^\n]*?\|[^\n]*?)：\*\{([\s\S]*?)\}\*", current[-1]
+                            r"(?m)^(?!\s*引用(?:正文|快照)：)([^\n]+?)：\*\{([\s\S]*?)\}\*",
+                            current[-1],
                         )
+                        if sender.strip()
                     ] if len(current) > 1 else []
                     entries.append({**common, "kind": "input", "messages": extracted,
                                     "raw": text})
@@ -265,8 +268,28 @@ def create_trace_dashboard(
         except (httpx.HTTPError, ValueError):
             status = None
         brand_name = cfg.brand_name
+        conv_ids = [str(item["id"]) for item in conversations if item.get("id")]
+        store_for_names: MemoryStore | None = None
+        if memory_db_path is not None or resolved_memory_db.is_file():
+            try:
+                store_for_names = get_memory_store()
+            except sqlite3.Error:
+                store_for_names = None
+        try:
+            names = await resolve_display_names(
+                store=store_for_names,
+                extra_ids=conv_ids,
+                contact_resolver=contact_resolver,
+                episode_db_path=resolved_episode_db,
+            )
+        except sqlite3.Error:
+            names = await resolve_display_names(
+                store=None,
+                extra_ids=conv_ids,
+                contact_resolver=contact_resolver,
+            )
         return {"brand_name": brand_name,
-                "conversations": conversations, "tools": tool_inventory(records),
+                "conversations": conversations, "names": names, "tools": tool_inventory(records),
                 "pilot": {key: status.get(key) for key in (
                     "mode", "trusted_gateway", "paused", "queue", "in_flight", "inbox_failures",
                     "tool_control_version"
@@ -334,19 +357,38 @@ def create_trace_dashboard(
     async def senders():
         store = get_memory_store()
         with sqlite_error_guard(), store._lock:
-            rows = store.db.execute(
+            contact_rows = store.db.execute(
                 "SELECT m.account_id,m.sender_id,MAX(m.captured_at) AS last_seen,"
                 "COUNT(*) AS message_count,COALESCE(p.remark,'') AS remark "
                 "FROM source_messages m LEFT JOIN sender_profiles p "
                 "ON p.account_id=m.account_id AND p.sender_id=m.sender_id AND p.state='active' "
-                "WHERE m.deleted_at IS NULL GROUP BY m.account_id,m.sender_id "
+                "WHERE m.deleted_at IS NULL AND m.sender_id NOT LIKE '%@chatroom' "
+                "GROUP BY m.account_id,m.sender_id "
+                "ORDER BY last_seen DESC LIMIT 100"
+            ).fetchall()
+            group_rows = store.db.execute(
+                "SELECT m.account_id,m.conversation_id AS sender_id,MAX(m.captured_at) AS last_seen,"
+                "COUNT(*) AS message_count,COALESCE(p.remark,'') AS remark "
+                "FROM source_messages m LEFT JOIN sender_profiles p "
+                "ON p.account_id=m.account_id AND p.sender_id=m.conversation_id AND p.state='active' "
+                "WHERE m.deleted_at IS NULL AND m.conversation_id LIKE '%@chatroom' "
+                "GROUP BY m.account_id,m.conversation_id "
                 "ORDER BY last_seen DESC LIMIT 100"
             ).fetchall()
             by_account: dict[str, list[str]] = defaultdict(list)
-            for row in rows:
-                by_account[str(row["account_id"])].append(str(row["sender_id"]))
+            all_ids_by_account: dict[str, list[str]] = defaultdict(list)
+            for row in contact_rows:
+                acct = str(row["account_id"])
+                sid = str(row["sender_id"])
+                by_account[acct].append(sid)
+                all_ids_by_account[acct].append(sid)
+            for row in group_rows:
+                acct = str(row["account_id"])
+                sid = str(row["sender_id"])
+                all_ids_by_account[acct].append(sid)
             memories_by_pair: dict[tuple[str, str], list[dict[str, object]]] = {}
             tags_by_pair: dict[tuple[str, str], list[str]] = {}
+            dir_by_account: dict[str, dict[str, dict[str, str]]] = {}
             for acct, sids in by_account.items():
                 mem_map = store.sender_memories(account_id=acct, sender_ids=sids)
                 for sid, entries in mem_map.items():
@@ -362,33 +404,60 @@ def create_trace_dashboard(
                     tags_by_pair.setdefault((acct, str(tag_row["sender_id"])), []).append(
                         str(tag_row["tag"])
                     )
-        semaphore = asyncio.Semaphore(16)
-        async def contact_label(sender_id: str) -> str:
-            if not sender_id or sender_id.startswith(("idle-event:", "Agent", "系统")):
-                return ""
-            def lookup() -> str:
-                identity = contact_resolver(sender_id)
-                return identity.nickname if identity and identity.nickname else ""
-            async with semaphore:
-                return await asyncio.to_thread(lookup)
-        labels = await asyncio.gather(*(contact_label(str(row["sender_id"])) for row in rows))
-        result = []
-        for row, nickname in zip(rows, labels, strict=True):
+            for acct, ids in all_ids_by_account.items():
+                dir_by_account[acct] = store.contact_directory_map(
+                    account_id=acct, contact_ids=ids
+                )
+
+        combined_rows: list[tuple[bool, sqlite3.Row]] = [
+            *((False, row) for row in contact_rows),
+            *((True, row) for row in group_rows),
+        ]
+        combined_rows.sort(key=lambda pair: str(pair[1]["last_seen"]), reverse=True)
+        live_nicknames = await resolve_live_nicknames(
+            [str(row["sender_id"]) for _, row in combined_rows],
+            contact_resolver,
+        )
+        pending_cache: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+        seen_cache: set[tuple[str, str]] = set()
+        for _, row in combined_rows:
             acct = str(row["account_id"])
             sid = str(row["sender_id"])
-            memories = memories_by_pair.get((acct, sid), [])
+            live_nick = live_nicknames.get(sid, "")
+            cached_nick = str(
+                dir_by_account.get(acct, {}).get(sid, {}).get("nickname") or ""
+            ).strip()
+            if live_nick and live_nick != cached_nick and (acct, sid) not in seen_cache:
+                seen_cache.add((acct, sid))
+                pending_cache[acct].append((sid, live_nick, "hook"))
+        for acct, cache_entries in pending_cache.items():
+            try:
+                store.upsert_contact_directory_batch(account_id=acct, entries=cache_entries)
+            except (sqlite3.Error, ValueError):
+                pass
+
+        result = []
+        for is_group, row in combined_rows:
+            acct = str(row["account_id"])
+            sid = str(row["sender_id"])
+            cached_nick = str(
+                dir_by_account.get(acct, {}).get(sid, {}).get("nickname") or ""
+            ).strip()
+            nickname = live_nicknames.get(sid, "") or cached_nick
+            memories = [] if is_group else memories_by_pair.get((acct, sid), [])
             result.append(
                 {
                     "account_id": acct,
                     "sender_id": sid,
+                    "is_group": is_group,
                     "nickname": nickname,
                     "remark": str(row["remark"]),
                     "last_seen": str(row["last_seen"]),
                     "message_count": int(row["message_count"]),
-                    "tags": tags_by_pair.get((acct, sid), []),
+                    "tags": [] if is_group else tags_by_pair.get((acct, sid), []),
                     "memories": memories,
-                    "memory_count": len(memories),
-                    "bloated": len(memories) >= SENDER_BLOAT_THRESHOLD,
+                    "memory_count": 0 if is_group else len(memories),
+                    "bloated": False if is_group else len(memories) >= SENDER_BLOAT_THRESHOLD,
                 }
             )
         return {"senders": result}
@@ -417,6 +486,7 @@ def create_trace_dashboard(
         get_memory_store=get_memory_store,
         get_event_book=get_event_book,
         get_episode_db_path=lambda: resolved_episode_db,
+        contact_resolver=contact_resolver,
     )
 
     @app.get("/api/records.jsonl")

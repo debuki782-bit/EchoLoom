@@ -35,6 +35,7 @@
 .chip-ok{background:#edf5ef;color:#3d704f;border-color:#d8eadc}
 .chip-warn{background:#fffaf0;color:#907448;border-color:#f0e4cd}
 .chip-muted{background:#f1f2ef;color:#737870;border-color:#e8e9e5}
+.chip-group{background:#eef3f8;color:#3b5f82;border-color:#d6e3f0}
 .chip-removable{padding-right:4px}
 .chip-x{border:0;background:transparent;color:#5c8067;font-size:12px;line-height:1;padding:0 3px;border-radius:999px}
 .chip-x:hover{background:#d8eadc;color:#274d34}

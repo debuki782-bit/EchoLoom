@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections import defaultdict
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
+from .contacts import ContactIdentity
 from .event_book import EventBook
 from .memory_store import MemoryStore, _like_escape
 
@@ -112,7 +115,15 @@ def _list_accounts(store: MemoryStore, episode_db_path: Path | None) -> list[str
             "GROUP BY account_id ORDER BY MAX(captured_at) DESC"
         ).fetchall():
             _add(str(row[0]))
-        for table in ("user_facts", "entity_terms", "sender_memories", "sender_tags", "event_book"):
+        for table in (
+            "user_facts",
+            "entity_terms",
+            "sender_memories",
+            "sender_tags",
+            "sender_profiles",
+            "contact_directory",
+            "event_book",
+        ):
             has_table = (
                 store.db.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -207,17 +218,178 @@ def _source_previews(
     }
 
 
+def format_human_display_name(remark: str, nickname: str) -> str:
+    """Format a human-facing display label without AI sensitive-word masking."""
+    clean_remark = remark.strip()
+    clean_nick = nickname.strip()
+    if clean_remark and clean_nick and clean_remark != clean_nick:
+        return f"{clean_remark}（{clean_nick}）"
+    return clean_remark or clean_nick
+
+
+def _should_query_contact_resolver(contact_id: str) -> bool:
+    cleaned = contact_id.strip()
+    if not cleaned:
+        return False
+    return (
+        not cleaned.startswith(("idle-event:", "Agent", "系统"))
+        and cleaned != DASHBOARD_ACTOR
+    )
+
+
+async def resolve_live_nicknames(
+    contact_ids: Sequence[str],
+    contact_resolver: Callable[[str], ContactIdentity | None] | None,
+) -> dict[str, str]:
+    """Query live contact nicknames concurrently with bounded parallelism."""
+    if contact_resolver is None:
+        return {}
+    unique_ids = list(
+        dict.fromkeys(
+            cid.strip() for cid in contact_ids if _should_query_contact_resolver(cid)
+        )
+    )
+    if not unique_ids:
+        return {}
+    semaphore = asyncio.Semaphore(16)
+
+    async def _lookup(cid: str) -> tuple[str, str]:
+        def _call() -> str:
+            try:
+                identity = contact_resolver(cid)
+            except (OSError, RuntimeError, ValueError, TypeError):
+                return ""
+            if identity and isinstance(identity.nickname, str):
+                return identity.nickname.strip()
+            return ""
+
+        async with semaphore:
+            return cid, await asyncio.to_thread(_call)
+
+    pairs = await asyncio.gather(*(_lookup(cid) for cid in unique_ids))
+    return {cid: nick for cid, nick in pairs if nick}
+
+
+def _episode_conversation_ids(episode_db_path: Path | None, account_id: str) -> list[str]:
+    if episode_db_path is None or not episode_db_path.is_file() or not account_id:
+        return []
+    try:
+        with closing(sqlite3.connect(episode_db_path, timeout=5.0)) as ep_db:
+            if not _episode_table_exists(ep_db):
+                return []
+            return [
+                str(row[0])
+                for row in ep_db.execute(
+                    "SELECT DISTINCT conversation_id FROM episodes WHERE account_id=?",
+                    (account_id,),
+                ).fetchall()
+                if str(row[0]).strip()
+            ]
+    except sqlite3.Error:
+        return []
+
+
+async def resolve_display_names(
+    *,
+    store: MemoryStore | None,
+    account_ids: Sequence[str] | None = None,
+    extra_ids: Sequence[str] = (),
+    contact_resolver: Callable[[str], ContactIdentity | None] | None = None,
+    episode_db_path: Path | None = None,
+) -> dict[str, str]:
+    """Build {id: display_label} from remarks, live resolver (write-through), and cache."""
+    remarks: dict[str, str] = {}
+    cached_nicknames: dict[str, str] = {}
+    dir_by_acct: dict[str, dict[str, dict[str, str]]] = {}
+    owner_accounts: dict[str, list[str]] = defaultdict(list)
+    seen_ids: dict[str, None] = {}
+    target_accounts: list[str] = []
+
+    def _register(cid: str, acct: str | None = None) -> None:
+        cleaned = cid.strip()
+        if not cleaned:
+            return
+        seen_ids.setdefault(cleaned, None)
+        if acct and acct not in owner_accounts[cleaned]:
+            owner_accounts[cleaned].append(acct)
+
+    if store is not None:
+        if account_ids is not None:
+            target_accounts = [a.strip() for a in account_ids if a.strip()]
+        else:
+            target_accounts = _list_accounts(store, episode_db_path)
+
+        # Iterate oldest-to-newest so the most recently active account wins on collisions.
+        for acct in reversed(target_accounts):
+            _register(acct, acct)
+            acct_remarks = store.all_sender_remarks(account_id=acct)
+            acct_dir = store.contact_directory_map(account_id=acct)
+            dir_by_acct[acct] = acct_dir
+            for cid, remark in acct_remarks.items():
+                _register(cid, acct)
+                if remark.strip():
+                    remarks[cid] = remark.strip()
+            for cid, entry in acct_dir.items():
+                _register(cid, acct)
+                nick = str(entry.get("nickname") or "").strip()
+                if nick:
+                    cached_nicknames[cid] = nick
+            with store._lock:
+                msg_rows = store.db.execute(
+                    "SELECT DISTINCT conversation_id, sender_id FROM source_messages "
+                    "WHERE account_id=? AND deleted_at IS NULL",
+                    (acct,),
+                ).fetchall()
+            for row in msg_rows:
+                _register(str(row[0]), acct)
+                _register(str(row[1]), acct)
+            for ep_conv in _episode_conversation_ids(episode_db_path, acct):
+                _register(ep_conv, acct)
+
+    for extra in extra_ids:
+        _register(extra)
+
+    all_ids = list(seen_ids)
+    live_nicknames = await resolve_live_nicknames(all_ids, contact_resolver)
+
+    if store is not None and live_nicknames and target_accounts:
+        pending_by_acct: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+        primary_acct = target_accounts[0]
+        for cid, nick in live_nicknames.items():
+            accts = owner_accounts.get(cid) or [primary_acct]
+            for acct in accts:
+                cached = str(dir_by_acct.get(acct, {}).get(cid, {}).get("nickname") or "").strip()
+                if nick != cached:
+                    pending_by_acct[acct].append((cid, nick, "hook"))
+        for acct, entries in pending_by_acct.items():
+            try:
+                store.upsert_contact_directory_batch(account_id=acct, entries=entries)
+            except (sqlite3.Error, ValueError):
+                pass
+
+    names: dict[str, str] = {}
+    for cid in all_ids:
+        label = format_human_display_name(
+            remarks.get(cid, ""),
+            live_nicknames.get(cid, "") or cached_nicknames.get(cid, ""),
+        )
+        if label:
+            names[cid] = label
+    return names
+
+
 def register_memory_routes(
     app: FastAPI,
     *,
     get_memory_store: Callable[[], MemoryStore],
     get_event_book: Callable[[], EventBook],
     get_episode_db_path: Callable[[], Path | None],
+    contact_resolver: Callable[[str], ContactIdentity | None] | None = None,
 ) -> None:
     """Attach local memory inspection and curation endpoints to the dashboard FastAPI app."""
 
     @app.get("/api/memory/summary")
-    def memory_summary(account_id: str = ""):
+    async def memory_summary(account_id: str = ""):
         store = get_memory_store()
         event_book = get_event_book()
         episode_path = get_episode_db_path()
@@ -228,6 +400,7 @@ def register_memory_routes(
                 return {
                     "accounts": accounts,
                     "account_id": "",
+                    "names": {},
                     "counts": {
                         "facts_total": 0,
                         "facts_in_index": 0,
@@ -298,9 +471,17 @@ def register_memory_routes(
 
             indexed_keys = store.fact_key_index(account_id=selected, limit=FACT_INDEX_LIMIT)
             ep_available, ep_total, ep_bloated = _episode_stats(episode_path, selected)
+            names = await resolve_display_names(
+                store=store,
+                account_ids=[selected],
+                extra_ids=accounts,
+                contact_resolver=contact_resolver,
+                episode_db_path=episode_path,
+            )
         return {
             "accounts": accounts,
             "account_id": selected,
+            "names": names,
             "counts": {
                 "facts_total": facts_total,
                 "facts_in_index": len(indexed_keys),
