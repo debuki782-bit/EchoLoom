@@ -17,8 +17,13 @@ from pydantic import BaseModel
 
 from . import local_config, prompt_catalog
 from .agent_tools import ReadOnlyToolset
-from .contacts import is_contact_id, is_room_id
 from .cross_session_tools import CrossSessionToolset
+from .dashboard_memory import (
+    SENDER_BLOAT_THRESHOLD,
+    register_memory_routes,
+    require_local_mutation,
+)
+from .event_book import EventBook
 from .idle_tools import IdleActivityToolset
 from .memory_store import MemoryStore
 from .project_tools import ProjectTools
@@ -184,9 +189,18 @@ def _transcript(records: list[dict]) -> list[dict]:
     return entries
 
 
-def create_trace_dashboard(trace_dir: Path = DEFAULT_TRACE_DIR, *, gateway=None) -> FastAPI:
+def create_trace_dashboard(
+    trace_dir: Path = DEFAULT_TRACE_DIR,
+    *,
+    gateway=None,
+    memory_db_path: Path | None = None,
+    episode_db_path: Path | None = None,
+) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     memory_store: MemoryStore | None = None
+    event_book: EventBook | None = None
+    resolved_memory_db = memory_db_path or (ROOT / "data" / "agent-memory.sqlite3")
+    resolved_episode_db = episode_db_path or (ROOT / "data" / "episode-memory.sqlite3")
     gateway = (
         gateway
         if gateway is not None
@@ -202,8 +216,14 @@ def create_trace_dashboard(trace_dir: Path = DEFAULT_TRACE_DIR, *, gateway=None)
     def get_memory_store() -> MemoryStore:
         nonlocal memory_store
         if memory_store is None:
-            memory_store = MemoryStore(ROOT / "data" / "agent-memory.sqlite3")
+            memory_store = MemoryStore(resolved_memory_db)
         return memory_store
+
+    def get_event_book() -> EventBook:
+        nonlocal event_book
+        if event_book is None:
+            event_book = EventBook(get_memory_store())
+        return event_book
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
@@ -222,7 +242,7 @@ def create_trace_dashboard(trace_dir: Path = DEFAULT_TRACE_DIR, *, gateway=None)
 
     @app.get("/assets/{name}")
     def asset(name: str):
-        if name not in {"app.js", "style.css"}:
+        if name not in {"app.js", "memory.js", "style.css"}:
             raise HTTPException(404)
         return FileResponse(ASSETS / name)
 
@@ -323,6 +343,26 @@ def create_trace_dashboard(trace_dir: Path = DEFAULT_TRACE_DIR, *, gateway=None)
                 "WHERE m.deleted_at IS NULL GROUP BY m.account_id,m.sender_id "
                 "ORDER BY last_seen DESC LIMIT 100"
             ).fetchall()
+            by_account: dict[str, list[str]] = defaultdict(list)
+            for row in rows:
+                by_account[str(row["account_id"])].append(str(row["sender_id"]))
+            memories_by_pair: dict[tuple[str, str], list[dict[str, object]]] = {}
+            tags_by_pair: dict[tuple[str, str], list[str]] = {}
+            for acct, sids in by_account.items():
+                mem_map = store.sender_memories(account_id=acct, sender_ids=sids)
+                for sid, entries in mem_map.items():
+                    memories_by_pair[(acct, sid)] = entries
+                placeholders = ",".join("?" for _ in sids)
+                tag_rows = store.db.execute(
+                    "SELECT sender_id, tag FROM sender_tags "
+                    f"WHERE account_id=? AND sender_id IN ({placeholders}) "
+                    "ORDER BY created_at, tag",
+                    (acct, *sids),
+                ).fetchall()
+                for tag_row in tag_rows:
+                    tags_by_pair.setdefault((acct, str(tag_row["sender_id"])), []).append(
+                        str(tag_row["tag"])
+                    )
         semaphore = asyncio.Semaphore(16)
         async def contact_label(sender_id: str) -> str:
             if not sender_id or sender_id.startswith(("idle-event:", "Agent", "系统")):
@@ -333,19 +373,30 @@ def create_trace_dashboard(trace_dir: Path = DEFAULT_TRACE_DIR, *, gateway=None)
             async with semaphore:
                 return await asyncio.to_thread(lookup)
         labels = await asyncio.gather(*(contact_label(str(row["sender_id"])) for row in rows))
-        return {"senders": [
-            {"account_id": str(row["account_id"]), "sender_id": str(row["sender_id"]),
-             "nickname": nickname, "remark": str(row["remark"]),
-             "last_seen": str(row["last_seen"]), "message_count": int(row["message_count"])}
-            for row, nickname in zip(rows, labels, strict=True)
-        ]}
+        result = []
+        for row, nickname in zip(rows, labels, strict=True):
+            acct = str(row["account_id"])
+            sid = str(row["sender_id"])
+            memories = memories_by_pair.get((acct, sid), [])
+            result.append(
+                {
+                    "account_id": acct,
+                    "sender_id": sid,
+                    "nickname": nickname,
+                    "remark": str(row["remark"]),
+                    "last_seen": str(row["last_seen"]),
+                    "message_count": int(row["message_count"]),
+                    "tags": tags_by_pair.get((acct, sid), []),
+                    "memories": memories,
+                    "memory_count": len(memories),
+                    "bloated": len(memories) >= SENDER_BLOAT_THRESHOLD,
+                }
+            )
+        return {"senders": result}
 
     @app.post("/api/senders/remark")
     def set_sender_remark(update: SenderRemarkUpdate, request: Request):
-        origin = request.headers.get("origin", "")
-        if (origin != f"http://{request.headers.get('host', '')}"
-                or request.headers.get("x-dashboard") != "1"):
-            raise HTTPException(403, "只接受本地管理页面的操作")
+        require_local_mutation(request)
         if (not update.account_id.strip() or len(update.account_id) > 256
                 or not update.sender_id.strip() or len(update.sender_id) > 256
                 or len(update.remark) > 120):
@@ -360,6 +411,13 @@ def create_trace_dashboard(trace_dir: Path = DEFAULT_TRACE_DIR, *, gateway=None)
             raise HTTPException(404, "联系人不在当前账号的消息档案中") from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    register_memory_routes(
+        app,
+        get_memory_store=get_memory_store,
+        get_event_book=get_event_book,
+        get_episode_db_path=lambda: resolved_episode_db,
+    )
 
     @app.get("/api/records.jsonl")
     def export_records(conversation: str):
@@ -378,6 +436,7 @@ def create_trace_dashboard(trace_dir: Path = DEFAULT_TRACE_DIR, *, gateway=None)
 
 def main(argv: list[str] | None = None) -> None:
     import argparse
+
     import uvicorn
 
     srv = local_config.load_local_runtime_config(ROOT).server

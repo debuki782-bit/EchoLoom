@@ -106,6 +106,7 @@ MODULE_LAYERS: dict[str, int] = {
     "cli": 5,
     "cross_chat_dedupe": 5,
     "cross_session_tools": 5,
+    "dashboard_memory": 5,
     "frameworks.__init__": 5,
     "frameworks.adk": 5,
     "frameworks.adk_budget": 5,

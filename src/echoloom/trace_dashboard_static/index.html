@@ -3,12 +3,20 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>EchoLoom · 对话与运行记录</title>
-  <link rel="stylesheet" href="/assets/style.css"><script src="/assets/app.js" defer></script>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+  <script src="/assets/memory.js" defer></script>
 </head>
 <body>
   <aside class="sidebar">
     <div class="brand"><div class="brand-mark">✳</div><div class="brand-text"><strong id="brand-name">EchoLoom</strong><small>Agent 工作台</small></div><button id="refresh" class="icon-button" title="刷新" aria-label="刷新">↻</button></div>
-    <div class="main-nav"><button class="nav active" data-view="chat"><span>▤</span> 会话记录</button><button class="nav" data-view="calls"><span>⌘</span> 工具调用</button><button class="nav" data-view="tools"><span>⚙</span> 工具管理</button><button class="nav" data-view="senders"><span>♙</span> 人物备注</button></div>
+    <div class="main-nav">
+      <button class="nav active" data-view="chat"><span>▤</span> 会话记录</button>
+      <button class="nav" data-view="calls"><span>⌘</span> 工具调用</button>
+      <button class="nav" data-view="tools"><span>⚙</span> 工具管理</button>
+      <button class="nav" data-view="senders"><span>♙</span> 人物档案</button>
+      <button class="nav" data-view="memory"><span>◧</span> 记忆库</button>
+    </div>
     <div class="side-heading"><span>聊天</span><span id="chat-count">—</span></div>
     <label class="search-wrap"><span>⌕</span><input id="chat-search" type="search" placeholder="搜索聊天" aria-label="搜索聊天"></label>
     <div id="chat-list" class="chat-list"><div class="side-empty">正在加载聊天…</div></div>
@@ -22,7 +30,39 @@
     </section>
     <section id="view-calls" class="view hidden"><header class="view-header"><div class="header-main"><div><h1>工具调用</h1><div class="header-sub">按时间查看所有会话的调用和结果</div></div><input id="call-search" class="page-search" placeholder="筛选已加载的工具或聊天" aria-label="筛选工具调用"></div></header><div class="content-scroll"><div class="page-content"><div class="section-title"><div><h2>调用记录</h2><p>只统计实际工具事件；请求快照中的历史不重复计数。</p></div><span id="calls-count" class="muted"></span></div><div id="calls-list"></div><button id="calls-more" class="history-button hidden">加载更多</button></div></div></section>
     <section id="view-tools" class="view hidden"><header class="view-header"><div class="header-main"><div><h1>工具管理</h1><div class="header-sub">控制主聊天与空闲 Agent 可调用的工具</div></div><input id="tool-search" class="page-search" placeholder="搜索工具" aria-label="搜索工具"></div></header><div class="content-scroll"><div class="page-content"><div id="control-warning" class="alert hidden"></div><div class="section-title"><div><h2>已注册工具</h2><p>关闭后保留声明，但后续调用会被拒绝；执行中的调用不会中断。</p></div><span id="tool-count" class="muted"></span></div><div id="tools-list" class="tool-list"></div></div></div></section>
-    <section id="view-senders" class="view hidden"><header class="view-header"><div class="header-main"><div><h1>人物备注</h1><div class="header-sub">人工维护的 Remark 会作为主名，Hook 昵称作为原名；Agent 只读</div></div><input id="sender-search" class="page-search" placeholder="搜索昵称、备注或 ID" aria-label="搜索联系人"></div></header><div class="content-scroll"><div class="page-content"><div class="alert">备注只由你在这里编辑。清空并保存会移除 Remark，聊天组装会退回显示微信昵称。</div><div class="section-title"><div><h2>最近出现的联系人</h2><p>按发送人稳定 ID 保存，跨 Session 和聊天一致生效。</p></div><span id="sender-count" class="muted"></span></div><div id="senders-list"></div></div></div></section>
+    <section id="view-senders" class="view hidden"><header class="view-header"><div class="header-main"><div><h1>人物档案</h1><div class="header-sub">人工维护的 Remark 为主名（Agent 只读），展开可管理标签与人物资料</div></div><input id="sender-search" class="page-search" placeholder="搜索昵称、备注、标签或资料" aria-label="搜索联系人"></div></header><div class="content-scroll"><div class="page-content"><div class="alert">Remark 仅由你在这里维护；展开联系人可查看并删改 Agent 沉淀的标签与人物资料，所有变更立即生效并保留审计记录。</div><div class="section-title"><div><h2>最近出现的联系人</h2><p>按发送人稳定 ID 关联，跨 Session 和群聊一致生效。</p></div><span id="sender-count" class="muted"></span></div><div id="senders-list"></div></div></div></section>
+    <section id="view-memory" class="view hidden">
+      <header class="view-header">
+        <div class="header-main">
+          <div>
+            <h1>记忆库</h1>
+            <div class="header-sub">查看、溯源并维护长期事实、事件簿、词典、批注与事件记忆</div>
+          </div>
+          <div class="header-actions">
+            <select id="memory-account" class="hidden" aria-label="选择账号"></select>
+            <input id="memory-search" class="page-search" placeholder="搜索当前分类" aria-label="搜索记忆">
+            <button id="memory-add-toggle" class="header-button primary-btn" type="button">+ 新增</button>
+          </div>
+        </div>
+      </header>
+      <div class="content-scroll">
+        <div class="page-content memory-page">
+          <div id="memory-stats" class="memory-stats"></div>
+          <div class="memory-toolbar">
+            <div id="memory-tabs" class="segmented" role="tablist" aria-label="记忆分类">
+              <button class="seg-btn active" type="button" role="tab" data-tab="facts">长期事实</button>
+              <button class="seg-btn" type="button" role="tab" data-tab="events">事件簿</button>
+              <button class="seg-btn" type="button" role="tab" data-tab="entities">词典</button>
+              <button class="seg-btn" type="button" role="tab" data-tab="annotations">消息批注</button>
+              <button class="seg-btn" type="button" role="tab" data-tab="episodes">事件记忆</button>
+            </div>
+            <div id="memory-subbar" class="memory-subbar"></div>
+          </div>
+          <div id="memory-create-panel" class="inline-panel hidden"></div>
+          <div id="memory-list"></div>
+        </div>
+      </div>
+    </section>
   </main>
   <div id="toast" class="toast hidden" role="status"></div>
 </body>

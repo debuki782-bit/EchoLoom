@@ -1,9 +1,13 @@
 import asyncio
 import json
+import sqlite3
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from echoloom import tool_policy
+from echoloom.event_book import EventBook
+from echoloom.memory_store import MemoryStore
 from echoloom.tool_timing import adk_function_tool
 from echoloom.toolsets import MediaToolset, MemoryToolset, ReplyToolset, WorkspaceToolset
 from echoloom.trace_dashboard import _tool_names, _transcript, create_trace_dashboard
@@ -112,3 +116,240 @@ def test_overview_lists_all_11_wechat_tools_via_static_tool_names(tmp_path, monk
         for name in expected_wechat_tools:
             assert by_name[name]["main"] is True
             assert by_name[name]["idle"] is True
+
+
+def test_dashboard_memory_workbench_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setattr(tool_policy, "POLICY_PATH", tmp_path / "controls.sqlite3")
+    memory_db = tmp_path / "agent-memory.sqlite3"
+    episode_db = tmp_path / "episode-memory.sqlite3"
+    store = MemoryStore(memory_db)
+    event_book = EventBook(store)
+
+    stored_msg = store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="wxid_alice",
+        sender_id="wxid_alice",
+        raw_envelope={"msglist": [{"msgsvrid": 1001}]},
+        body_text="我对芒果过敏，以后点甜品别放芒果。",
+    )
+    fact_id = store.remember_fact(
+        account_id="wxid_bot",
+        fact_key="alice_allergy",
+        content="Alice 对芒果过敏",
+        source_message_id=stored_msg.message_id,
+    )
+    note_id = store.add_note(
+        account_id="wxid_bot",
+        message_id=stored_msg.message_id,
+        content="饮食禁忌线索",
+    )
+    entity_id = store.upsert_entity(
+        account_id="wxid_bot",
+        term="小橘",
+        explanation="Alice 养的橘猫",
+    )
+    event_res = event_book.add(
+        account_id="wxid_bot",
+        priority="ordinary",
+        content="周五和 Alice 约晚饭",
+        exit_condition="周五晚饭结束后删除",
+    )
+    stale_at = (datetime.now(UTC) - timedelta(hours=80)).isoformat()
+    with store.transaction():
+        store.db.execute(
+            "UPDATE event_book SET updated_at=? WHERE event_id=?",
+            (stale_at, event_res["event_id"]),
+        )
+    store.close()
+
+    app = create_trace_dashboard(
+        tmp_path,
+        memory_db_path=memory_db,
+        episode_db_path=episode_db,
+    )
+    headers = {"origin": "http://127.0.0.1:8767", "x-dashboard": "1"}
+
+    with TestClient(app, base_url="http://127.0.0.1:8767") as client:
+        # Static asset & CSS fix verification
+        assert client.get("/assets/memory.js").status_code == 200
+        css_text = client.get("/assets/style.css").text
+        assert "+@media" not in css_text
+
+        # Summary & missing episode DB graceful degradation
+        summary = client.get("/api/memory/summary").json()
+        assert summary["account_id"] == "wxid_bot"
+        assert summary["counts"]["facts_total"] == 1
+        assert summary["counts"]["facts_in_index"] == 1
+        assert summary["counts"]["events_stale_72h"] == 1
+        assert summary["counts"]["entities_total"] == 1
+        assert summary["counts"]["annotations_total"] == 1
+        assert summary["counts"]["episodes_available"] is False
+        assert client.get("/api/memory/episodes").json()["available"] is False
+
+        # Local mutation guard
+        assert client.post(
+            "/api/senders/tags",
+            json={"account_id": "wxid_bot", "sender_id": "wxid_alice", "action": "add", "tags": ["好友"]},
+        ).status_code == 403
+
+        # Senders profile: tags + sender memories
+        tag_res = client.post(
+            "/api/senders/tags",
+            json={"account_id": "wxid_bot", "sender_id": "wxid_alice", "action": "add", "tags": ["唯一主人"]},
+            headers=headers,
+        )
+        assert tag_res.status_code == 200
+        assert tag_res.json()["tags"] == ["唯一主人"]
+
+        mem_res = client.post(
+            "/api/senders/memories",
+            json={
+                "account_id": "wxid_bot",
+                "sender_id": "wxid_alice",
+                "topic": "偏好",
+                "content": "喜欢无糖美式",
+            },
+            headers=headers,
+        )
+        assert mem_res.status_code == 200
+        memory_id = mem_res.json()["memory_id"]
+
+        senders = client.get("/api/senders").json()["senders"]
+        alice = next(item for item in senders if item["sender_id"] == "wxid_alice")
+        assert alice["tags"] == ["唯一主人"]
+        assert alice["memory_count"] == 1
+        assert alice["memories"][0]["memory_id"] == memory_id
+
+        assert client.delete(
+            f"/api/senders/memories/{memory_id}",
+            params={"account_id": "wxid_bot"},
+            headers=headers,
+        ).status_code == 200
+
+        # User facts: list with provenance + versioned update + delete
+        facts = client.get("/api/memory/facts", params={"account_id": "wxid_bot"}).json()["facts"]
+        assert len(facts) == 1
+        assert facts[0]["fact_id"] == fact_id
+        assert facts[0]["in_index"] is True
+        assert facts[0]["index_rank"] == 1
+        assert "芒果" in facts[0]["source"]["body_text"]
+
+        recents = client.get("/api/memory/recent-messages", params={"account_id": "wxid_bot"}).json()
+        assert recents["messages"][0]["message_id"] == stored_msg.message_id
+
+        updated_fact = client.post(
+            "/api/memory/facts",
+            json={
+                "account_id": "wxid_bot",
+                "fact_key": "alice_allergy",
+                "content": "Alice 对芒果和菠萝过敏",
+                "source_message_id": stored_msg.message_id,
+            },
+            headers=headers,
+        )
+        assert updated_fact.status_code == 200
+        new_fact_id = updated_fact.json()["fact_id"]
+        facts_after = client.get("/api/memory/facts", params={"account_id": "wxid_bot"}).json()["facts"]
+        assert facts_after[0]["fact_id"] == new_fact_id
+        assert facts_after[0]["version"] == 2
+        assert facts_after[0]["author_id"] == "dashboard-user"
+        assert client.delete(
+            f"/api/memory/facts/{new_fact_id}",
+            params={"account_id": "wxid_bot"},
+            headers=headers,
+        ).status_code == 200
+
+        # Event book: list stale + create + update + delete
+        events = client.get("/api/memory/events", params={"account_id": "wxid_bot"}).json()
+        assert events["events"][0]["stale_72h"] is True
+        created_evt = client.post(
+            "/api/memory/events",
+            json={
+                "account_id": "wxid_bot",
+                "priority": "high",
+                "content": "下周一提交项目评审材料",
+                "exit_condition": "评审材料提交后删除",
+            },
+            headers=headers,
+        )
+        assert created_evt.status_code == 200
+        high_event_id = created_evt.json()["event_id"]
+        patched_evt = client.patch(
+            f"/api/memory/events/{high_event_id}",
+            json={
+                "account_id": "wxid_bot",
+                "content": "下周二提交项目评审材料",
+                "exit_condition": "评审材料提交后删除",
+            },
+            headers=headers,
+        )
+        assert patched_evt.status_code == 200
+        assert client.delete(
+            f"/api/memory/events/{high_event_id}",
+            params={"account_id": "wxid_bot"},
+            headers=headers,
+        ).status_code == 200
+
+        # Entity dictionary: list + update + delete
+        entities = client.get("/api/memory/entities", params={"account_id": "wxid_bot"}).json()["entities"]
+        assert entities[0]["entity_id"] == entity_id
+        ent_up = client.post(
+            "/api/memory/entities",
+            json={"account_id": "wxid_bot", "term": "小橘", "explanation": "Alice 养的两岁橘猫"},
+            headers=headers,
+        )
+        assert ent_up.status_code == 200
+        new_entity_id = ent_up.json()["entity_id"]
+        assert client.delete(
+            f"/api/memory/entities/{new_entity_id}",
+            params={"account_id": "wxid_bot"},
+            headers=headers,
+        ).status_code == 200
+
+        # Annotations: list + patch + delete
+        notes = client.get("/api/memory/annotations", params={"account_id": "wxid_bot"}).json()["annotations"]
+        assert notes[0]["note_id"] == note_id
+        assert notes[0]["editable"] is True
+        assert client.patch(
+            f"/api/memory/annotations/{note_id}",
+            json={"account_id": "wxid_bot", "content": "饮食禁忌（已复核）"},
+            headers=headers,
+        ).json()["version"] == 2
+        assert client.delete(
+            f"/api/memory/annotations/{note_id}",
+            params={"account_id": "wxid_bot"},
+            headers=headers,
+        ).status_code == 200
+
+        # Episode vector memory DB: inspect + bloated flag + cascade delete
+        with sqlite3.connect(episode_db) as ep_db:
+            ep_db.executescript(
+                "CREATE TABLE episodes ("
+                "id TEXT PRIMARY KEY, account_id TEXT NOT NULL, conversation_id TEXT NOT NULL, "
+                "summary TEXT NOT NULL, updated_at TEXT NOT NULL, model TEXT NOT NULL, vector BLOB NOT NULL);"
+                "CREATE TABLE episode_sources ("
+                "episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE, "
+                "message_id TEXT NOT NULL, PRIMARY KEY (episode_id, message_id));"
+            )
+            now_iso = datetime.now(UTC).isoformat()
+            for idx in range(12):
+                ep_db.execute(
+                    "INSERT INTO episodes VALUES (?,?,?,?,?,?,?)",
+                    (f"ep_{idx}", "wxid_bot", "wxid_alice", f"事件摘要 {idx}", now_iso, "text-embedding", b"\x00\x00"),
+                )
+            ep_db.execute("INSERT INTO episode_sources VALUES (?,?)", ("ep_0", stored_msg.message_id))
+
+        ep_resp = client.get("/api/memory/episodes", params={"account_id": "wxid_bot"}).json()
+        assert ep_resp["available"] is True
+        assert ep_resp["conversations"][0]["bloated"] is True
+        ep0 = next(item for item in ep_resp["episodes"] if item["id"] == "ep_0")
+        assert ep0["sources"][0]["message_id"] == stored_msg.message_id
+
+        assert client.delete(
+            "/api/memory/episodes/ep_0",
+            params={"account_id": "wxid_bot"},
+            headers=headers,
+        ).status_code == 200
+        with sqlite3.connect(episode_db) as ep_db:
+            assert ep_db.execute("SELECT COUNT(*) FROM episode_sources WHERE episode_id='ep_0'").fetchone()[0] == 0
+
