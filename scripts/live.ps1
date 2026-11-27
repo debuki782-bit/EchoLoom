@@ -83,6 +83,22 @@ function Get-PythonProcesses {
         $_.Name -in @('python.exe','pythonw.exe') -and $_.CommandLine
     })
 }
+function Test-ProcessGroupUsesExpectedPython($processes, [string]$expectedPython, $allPythonProcs) {
+    $list=@($processes)
+    if($list.Count -eq 0){return $false}
+    $expectedFull=[IO.Path]::GetFullPath($expectedPython)
+    $byId=@{}
+    foreach($p in @($allPythonProcs)){$byId[[int]$p.ProcessId]=$p}
+    foreach($proc in $list){
+        $exeOk=($proc.ExecutablePath -and ([IO.Path]::GetFullPath($proc.ExecutablePath) -ieq $expectedFull))
+        if($exeOk){continue}
+        $parentId=if($null -ne $proc.ParentProcessId){[int]$proc.ParentProcessId}else{0}
+        $parent=if($parentId -gt 0 -and $byId.ContainsKey($parentId)){$byId[$parentId]}else{$null}
+        $parentOk=($null -ne $parent -and $parent.ExecutablePath -and ([IO.Path]::GetFullPath($parent.ExecutablePath) -ieq $expectedFull))
+        if(-not $parentOk){return $false}
+    }
+    return $true
+}
 function Get-IngressProcesses {
     @(Get-PythonProcesses | Where-Object {
         (Test-CmdContains $_.CommandLine '--run') -and (
@@ -287,8 +303,19 @@ if($Action -eq 'restart-worker') {
 $liveState=Get-AgentStatusOrNull 2
 if($null -ne $liveState){
     $listeners=Get-PilotListenerIds
-    $ingressProcs=Get-IngressProcesses
-    $legacyProcs=Get-LegacyPilotProcesses
+    $allPy=Get-PythonProcesses
+    $ingressProcs=@($allPy | Where-Object {
+        (Test-CmdContains $_.CommandLine '--run') -and (
+            (Test-CmdContains $_.CommandLine $ingressScript) -or
+            ((Test-CmdContains $_.CommandLine $workerScript) -and (Test-CmdHasRole $_.CommandLine 'ingress'))
+        )
+    })
+    $legacyProcs=@($allPy | Where-Object {
+        (Test-CmdContains $_.CommandLine $workerScript) -and
+        (Test-CmdContains $_.CommandLine '--run') -and
+        (-not (Test-CmdHasRole $_.CommandLine 'worker')) -and
+        (-not (Test-CmdHasRole $_.CommandLine 'ingress'))
+    })
     $ingressIds=@($ingressProcs | Select-Object -ExpandProperty ProcessId)
     $legacyIds=@($legacyProcs | Select-Object -ExpandProperty ProcessId)
     $isIngress=($listeners.Count -eq 1 -and $listeners[0] -in $ingressIds)
@@ -297,29 +324,39 @@ if($null -ne $liveState){
         throw 'Agent status is live but the listener PID does not match this project'
     }
     if($isLegacy){
-        $listeners[0] | Set-Content -LiteralPath $legacyPidPath
-        if($Action -eq 'start'){[void](Ensure-NativeImageDownload)}
-        Format-StatusOutput $liveState ([int]$listeners[0]) ([int]$listeners[0]) 'single_process'
-        exit
+        if($Action -eq 'start'){
+            [void](Stop-AllAgentProcesses)
+        } else {
+            $listeners[0] | Set-Content -LiteralPath $legacyPidPath
+            Format-StatusOutput $liveState ([int]$listeners[0]) ([int]$listeners[0]) 'single_process'
+            exit
+        }
+    } else {
+        $ingressPid=[int]$listeners[0]
+        $ingressPid | Set-Content -LiteralPath $ingressPidPath
+        $workerPid=Sync-WorkerPidFile
+        if($Action -eq 'status'){
+            Format-StatusOutput $liveState $ingressPid $workerPid 'scheme_a'
+            exit
+        }
+        $ingressMatchesPython=Test-ProcessGroupUsesExpectedPython $ingressProcs $python $allPy
+        if($ingressMatchesPython){
+            # Action -eq 'start' with live Ingress on current Python: ensure Worker is also up on current Python.
+            $workers=Get-WorkerProcesses
+            $workerMatchesPython=Test-ProcessGroupUsesExpectedPython $workers $python $allPy
+            if($null -ne $workerPid -and [bool]$liveState.worker_alive -and $workerMatchesPython){
+                [void](Ensure-NativeImageDownload)
+                Format-StatusOutput $liveState $ingressPid $workerPid 'scheme_a'
+                exit
+            }
+            Stop-OnlyWorkerProcesses
+            $started=Start-WorkerProcess
+            [void](Ensure-NativeImageDownload)
+            Format-StatusOutput $started.State $ingressPid $started.WorkerPid 'scheme_a'
+            exit
+        }
+        [void](Stop-AllAgentProcesses)
     }
-    $ingressPid=[int]$listeners[0]
-    $ingressPid | Set-Content -LiteralPath $ingressPidPath
-    $workerPid=Sync-WorkerPidFile
-    if($Action -eq 'status'){
-        Format-StatusOutput $liveState $ingressPid $workerPid 'scheme_a'
-        exit
-    }
-    # Action -eq 'start' with live Ingress: ensure Worker is also up without disturbing Ingress.
-    if($null -ne $workerPid -and [bool]$liveState.worker_alive){
-        [void](Ensure-NativeImageDownload)
-        Format-StatusOutput $liveState $ingressPid $workerPid 'scheme_a'
-        exit
-    }
-    Stop-OnlyWorkerProcesses
-    $started=Start-WorkerProcess
-    [void](Ensure-NativeImageDownload)
-    Format-StatusOutput $started.State $ingressPid $started.WorkerPid 'scheme_a'
-    exit
 }
 
 if($Action -eq 'status'){throw 'Selfhosted Agent is not available'}

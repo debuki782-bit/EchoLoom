@@ -29,12 +29,12 @@ def build_providers(
 ) -> ProviderBundle:
     """Build OpenAI/Gemini clients, refreshable pool probe, and budgeted model factories."""
     from google.genai import types
+    from openai import AsyncOpenAI
 
     from .frameworks.adk_budget import BudgetedAdkModel
     from .frameworks.adk_openai import OpenAIAdkModel
     from .frameworks.google_web import GoogleWebModel
     from .mock import SystemClock
-    from .openai_http import OpenAIHttpClient
     from .storage import Repository
     from .usage import UsageLedger
 
@@ -64,7 +64,7 @@ def build_providers(
             "(required by OpenAI profiles, memory_model, or episode_rag_enabled=true)"
         )
     openai_client = (
-        OpenAIHttpClient(api_key=openai_key, timeout=60, max_retries=0) if openai_key else None
+        AsyncOpenAI(api_key=openai_key, timeout=60, max_retries=0) if openai_key else None
     )
     gemini_key = os.environ.get("GEMINI_API_KEY") or load_key_fn()
     if needs_gemini and not gemini_key:

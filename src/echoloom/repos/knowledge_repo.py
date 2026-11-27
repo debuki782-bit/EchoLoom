@@ -524,7 +524,7 @@ class KnowledgeRepo:
         with self._lock:
             rows = self.db.execute(
                 "SELECT fact_key FROM user_facts WHERE account_id=? AND state='active' "
-                "ORDER BY updated_at DESC, fact_id DESC LIMIT ?",
+                "ORDER BY updated_at DESC, rowid DESC LIMIT ?",
                 (account_id, limit),
             ).fetchall()
         return list(dict.fromkeys(str(row["fact_key"]) for row in rows if row["fact_key"]))
@@ -557,7 +557,7 @@ class KnowledgeRepo:
             excess_fact_rows = (
                 self.db.execute(
                     "SELECT fact_key FROM user_facts WHERE account_id=? AND state='active' "
-                    "ORDER BY updated_at ASC, fact_id ASC LIMIT ?",
+                    "ORDER BY updated_at ASC, rowid ASC LIMIT ?",
                     (account_id, limit),
                 ).fetchall()
                 if fact_count >= fact_threshold

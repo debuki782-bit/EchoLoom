@@ -223,11 +223,47 @@ $customGateway = (-not $usesWechatSource) -or `
 $exitCode = 0
 try {
     if (-not $CheckOnly) {
-        # Start the local trace dashboard once, and never take over an unrelated port owner.
+        # Start the local trace dashboard once, and restart if it runs on a stale Python interpreter.
         $dashboardListeners = @(
             Get-NetTCPConnection -LocalPort $dashboardPort -State Listen -ErrorAction SilentlyContinue |
                 Select-Object -ExpandProperty OwningProcess -Unique
         )
+        $restartedStaleDashboard = $false
+        if ($dashboardListeners.Count -gt 0) {
+            $dashProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+                $_.Name -in @('python.exe', 'pythonw.exe') -and
+                $_.CommandLine -and
+                $_.CommandLine.IndexOf($dashboardScript, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+            })
+            $dashById = @{}
+            foreach ($p in $dashProcs) { $dashById[[int]$p.ProcessId] = $p }
+            $expectedPyFull = [IO.Path]::GetFullPath($python)
+            $dashOwnedByProject = ($dashboardListeners.Count -eq 1 -and $dashById.ContainsKey([int]$dashboardListeners[0]))
+            $dashMatchesPython = $false
+            if ($dashOwnedByProject) {
+                $ownerProc = $dashById[[int]$dashboardListeners[0]]
+                $ownerExeOk = ($ownerProc.ExecutablePath -and ([IO.Path]::GetFullPath($ownerProc.ExecutablePath) -ieq $expectedPyFull))
+                $parentProc = if ($ownerProc.ParentProcessId -and $dashById.ContainsKey([int]$ownerProc.ParentProcessId)) { $dashById[[int]$ownerProc.ParentProcessId] } else { $null }
+                $parentExeOk = ($null -ne $parentProc -and $parentProc.ExecutablePath -and ([IO.Path]::GetFullPath($parentProc.ExecutablePath) -ieq $expectedPyFull))
+                $dashMatchesPython = ($ownerExeOk -or $parentExeOk)
+            }
+            if ($dashOwnedByProject -and -not $dashMatchesPython) {
+                foreach ($p in ($dashProcs | Sort-Object CreationDate -Descending)) {
+                    if (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue) {
+                        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                for ($w = 0; $w -lt 20; $w++) {
+                    if (-not (Get-NetTCPConnection -LocalPort $dashboardPort -State Listen -ErrorAction SilentlyContinue)) { break }
+                    Start-Sleep -Milliseconds 250
+                }
+                $dashboardListeners = @(
+                    Get-NetTCPConnection -LocalPort $dashboardPort -State Listen -ErrorAction SilentlyContinue |
+                        Select-Object -ExpandProperty OwningProcess -Unique
+                )
+                $restartedStaleDashboard = $true
+            }
+        }
         if ($dashboardListeners.Count -gt 0) {
             if (-not (Test-TraceDashboard)) {
                 throw "端口 $dashboardPort 已被其他程序占用；为避免误操作，没有启动管理页。"
@@ -252,7 +288,7 @@ try {
             if (-not $dashboardReady) {
                 throw '管理页启动失败；请查看 .tmp\dashboard.stderr.log。'
             }
-            Write-Host "管理页已启动：$dashboardUrl/"
+            Write-Host ($(if ($restartedStaleDashboard) { "管理页已重启（切换至当前 Python 环境）：$dashboardUrl/" } else { "管理页已启动：$dashboardUrl/" }))
         }
 
         # Start Scheme A Agent Ingress (:8080) + Worker before waiting on WeChat login so

@@ -65,7 +65,6 @@ MODULE_LAYERS: dict[str, int] = {
     "hook_status_recovery": 1,
     "media": 1,
     "native_image_download": 1,
-    "openai_http": 1,
     "rich_message": 1,
     "wechat_gateway": 1,
     # Layer 2: SQLite persistence, usage ledger, repositories & schedulers.
@@ -287,9 +286,6 @@ def test_core_layers_forbid_llm_agent_sdk_imports() -> None:
 def test_removed_openai_agents_sdk_has_no_stale_references() -> None:
     lock_text = (ROOT / "requirements.lock").read_text(encoding="utf-8")
     assert "openai-agents==" not in lock_text
-    assert "openai==" not in lock_text
-    pyproject_text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert '"openai==' not in pyproject_text and "'openai==" not in pyproject_text
     arch_doc = (ROOT / "docs" / "architecture" / "current-architecture.md").read_text(
         encoding="utf-8"
     )
@@ -305,6 +301,6 @@ def test_removed_openai_agents_sdk_has_no_stale_references() -> None:
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
-                        assert alias.name.split(".")[0] not in {"openai", "agents"}, path
+                        assert alias.name.split(".")[0] != "agents", path
                 elif isinstance(node, ast.ImportFrom) and node.module:
-                    assert node.module.split(".")[0] not in {"openai", "agents"}, path
+                    assert node.module.split(".")[0] != "agents", path

@@ -17,6 +17,7 @@ from google.adk.agents.run_config import RunConfig
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from openai import APIStatusError
 from pydantic import BaseModel
 
 from .context import ContextTurn
@@ -29,7 +30,6 @@ from .episode_store import (
     RecallTurn,
     recall_turn,
 )
-from .providers import _http_status_code
 from .runtime_scope import current_model_usage_profile, current_model_usage_route, model_usage_scope
 from .usage import IMAGE_GENERATION_DAILY_BUDGET_MICROUSD, IMAGE_READ_DAILY_BUDGET_MICROUSD
 
@@ -171,9 +171,8 @@ class EpisodeMemory:
                 dimensions=DIMENSIONS,
                 timeout=8.0,
             )
-        except Exception as exc:
-            status = _http_status_code(exc)
-            if status is not None and 400 <= status < 500:
+        except APIStatusError as exc:
+            if 400 <= exc.status_code < 500:
                 self.usage.release(request_id)
             raise
         self.usage.settle(request_id, (result.usage.total_tokens * 20 + 999) // 1000)

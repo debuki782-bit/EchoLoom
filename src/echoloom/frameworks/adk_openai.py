@@ -7,7 +7,6 @@ import copy
 import hashlib
 import json
 from collections import OrderedDict
-from types import SimpleNamespace
 from typing import Any
 
 from google.adk.models.base_llm import BaseLlm
@@ -313,12 +312,7 @@ class OpenAIAdkModel(BaseLlm):
             elif item_type == "function_call":
                 raw_args = getattr(item, "arguments", None) or "{}"
                 try:
-                    if isinstance(raw_args, str):
-                        args = json.loads(raw_args)
-                    elif isinstance(raw_args, SimpleNamespace):
-                        args = vars(raw_args)
-                    else:
-                        args = dict(raw_args)
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
                     if not isinstance(args, dict):
                         args = {"invalid_arguments": True}
                 except (ValueError, TypeError):

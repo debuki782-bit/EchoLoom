@@ -194,9 +194,9 @@ def test_sdk_image_tool_pixels_reach_next_model_request(tmp_path):
 
 def test_official_client_request_usage_and_unknown_accounting(tmp_path):
     import httpx as httpx2
+    from openai import AsyncOpenAI
 
     from echoloom.mock import SystemClock
-    from echoloom.openai_http import OpenAIHttpClient as AsyncOpenAI
     from echoloom.providers import ModelCallIndeterminate
     from echoloom.storage import Repository
     from echoloom.usage import UsageLedger
@@ -319,8 +319,9 @@ def test_luna_active_compression_happens_before_new_turn_once(tmp_path):
 def test_luna_complete_request_input_limit(tmp_path, tokens, allowed):
     import json
 
+    from openai import AsyncOpenAI
+
     from echoloom.mock import SystemClock
-    from echoloom.openai_http import OpenAIHttpClient as AsyncOpenAI
     from echoloom.storage import Repository
     from echoloom.usage import UsageLedger
 
@@ -450,9 +451,9 @@ def test_sdk_idle_summary_runs_once_and_is_in_next_session(tmp_path):
 
 def test_openai_count_input_tokens_transport_failure_raises_provider_unavailable(tmp_path):
     from google.adk.models.llm_request import LlmRequest
+    from openai import AsyncOpenAI
 
     from echoloom.mock import SystemClock
-    from echoloom.openai_http import OpenAIHttpClient as AsyncOpenAI
     from echoloom.runtime_contract import ModelProviderUnavailable
     from echoloom.runtime_scope import model_usage_scope
     from echoloom.storage import Repository
@@ -503,9 +504,9 @@ def test_openai_post_reserve_pre_vs_post_dispatch_errors(
     tmp_path, err_cls, expected_name, expected_state,
 ):
     from google.adk.models.llm_request import LlmRequest
+    from openai import AsyncOpenAI
 
     from echoloom.mock import SystemClock
-    from echoloom.openai_http import OpenAIHttpClient as AsyncOpenAI
     from echoloom.runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
     from echoloom.runtime_scope import model_usage_scope
     from echoloom.storage import Repository
@@ -553,8 +554,9 @@ def test_openai_post_reserve_pre_vs_post_dispatch_errors(
 def test_adk_openai_rollback_and_mid_turn_indeterminate(tmp_path):
     import json
 
+    from openai import AsyncOpenAI
+
     from echoloom.mock import SystemClock
-    from echoloom.openai_http import OpenAIHttpClient as AsyncOpenAI
     from echoloom.runtime_contract import (
         Content,
         ModelCallIndeterminate,
@@ -731,9 +733,9 @@ def test_openai_http_reject_status_releases_or_retains_reservation(
     tmp_path, status_code: int, expected_exc: str, expected_state: str,
 ):
     from google.adk.models.llm_request import LlmRequest
+    from openai import AsyncOpenAI
 
     from echoloom.mock import SystemClock
-    from echoloom.openai_http import OpenAIHttpClient as AsyncOpenAI
     from echoloom.runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
     from echoloom.runtime_scope import model_usage_scope
     from echoloom.storage import Repository
@@ -785,8 +787,7 @@ def test_openai_count_tokens_matches_create_options_and_uses_lru_cache():
     import json
 
     from google.adk.models.llm_request import LlmRequest
-
-    from echoloom.openai_http import OpenAIHttpClient as AsyncOpenAI
+    from openai import AsyncOpenAI
 
     async def scenario():
         count_bodies = []

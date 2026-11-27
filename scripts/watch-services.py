@@ -25,6 +25,7 @@ PILOT_STDERR = TMP_DIR / "pilot.stderr.log"
 INBOX_DB = DATA_DIR / "pilot-receipts.sqlite3"
 MEMORY_DB = DATA_DIR / "agent-memory.sqlite3"
 MONITOR_LOG = TMP_DIR / "service-monitor.log"
+_LAST_LOGIN_PROBE_WARN_AT = 0.0
 
 
 def _now() -> str:
@@ -328,6 +329,14 @@ def _poll_messages(inbox_rowid: int, mem_rowid: int, log_offset: int, log: Logge
                         log.log("推理完成", raw.split("event=", 1)[1])
                     elif "event=process_finished" in raw and "state=empty_reply" in raw:
                         log.log("决策结果", "本轮选择保持沉默 (" + raw.split("event=", 1)[1] + ")")
+                    elif "event=worker_batch_failed" in raw or "event=process_failed" in raw:
+                        log.log("异常", _compact(raw.split("event=", 1)[1], 220))
+                    elif "event=wechat_login_probe_failed" in raw:
+                        global _LAST_LOGIN_PROBE_WARN_AT
+                        now_mono = time.monotonic()
+                        if _LAST_LOGIN_PROBE_WARN_AT == 0.0 or (now_mono - _LAST_LOGIN_PROBE_WARN_AT >= 30.0):
+                            _LAST_LOGIN_PROBE_WARN_AT = now_mono
+                            log.log("告警", _compact(raw.split("event=", 1)[1], 220))
                     elif " ERROR " in raw or " CRITICAL " in raw:
                         log.log("异常", _compact(raw, 220))
         except OSError:

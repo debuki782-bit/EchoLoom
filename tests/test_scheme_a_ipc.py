@@ -660,3 +660,39 @@ def test_watch_services_heals_worker_without_restarting_ingress(tmp_path: Path) 
         ]
     finally:
         log.close()
+
+
+def test_watch_services_poll_messages_surfaces_batch_and_login_failures(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """_poll_messages must log worker_batch_failed/process_failed and throttle login probe alerts."""
+    watch = _load_script_module("watch_services_poll_test", "scripts/watch-services.py")
+    fake_stderr = tmp_path / "pilot.stderr.log"
+    fake_stderr.write_text(
+        "2026-11-27 23:59:32,967 WARNING echoloom.dispatcher "
+        "event=worker_batch_failed batch=24e27dcfffb3 error_type=FileNotFoundError\n"
+        "2026-11-27 23:59:33,001 WARNING echoloom.dispatcher "
+        "event=process_failed receipt=abc123 phase=agent error_type=RuntimeError\n"
+        "2026-11-27 23:59:34,001 INFO echoloom.triggers "
+        "event=wechat_login_probe_failed error_type=FileNotFoundError\n"
+        "2026-11-27 23:59:36,001 INFO echoloom.triggers "
+        "event=wechat_login_probe_failed error_type=FileNotFoundError\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(watch, "PILOT_STDERR", fake_stderr)
+    monkeypatch.setattr(watch, "INBOX_DB", tmp_path / "missing-inbox.sqlite3")
+    monkeypatch.setattr(watch, "MEMORY_DB", tmp_path / "missing-memory.sqlite3")
+    monkeypatch.setattr(watch, "_LAST_LOGIN_PROBE_WARN_AT", 0.0)
+
+    log_path = tmp_path / "monitor.log"
+    log = watch.Logger(log_path)
+    try:
+        watch._poll_messages(0, 0, 0, log)
+    finally:
+        log.close()
+
+    logged = log_path.read_text(encoding="utf-8")
+    assert "[异常] worker_batch_failed batch=24e27dcfffb3 error_type=FileNotFoundError" in logged
+    assert "[异常] process_failed receipt=abc123 phase=agent error_type=RuntimeError" in logged
+    assert logged.count("wechat_login_probe_failed") == 1
+
