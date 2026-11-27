@@ -75,9 +75,10 @@ class MemoryStore:
         self._file_root = (path.parent / "received-files").resolve()
         self.path = Path(path).resolve()
         self._lock = threading.RLock()
-        self.db = sqlite3.connect(path, timeout=1, check_same_thread=False)
+        self.db = sqlite3.connect(path, timeout=5.0, check_same_thread=False)
         register_thread_safe_db(self.db, self._lock, owner=self)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA busy_timeout=5000")
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA journal_mode=WAL")
         init_memory_schema(self.db, self._lock, self.transaction)

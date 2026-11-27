@@ -22,6 +22,7 @@ from .dashboard_memory import (
     SENDER_BLOAT_THRESHOLD,
     register_memory_routes,
     require_local_mutation,
+    sqlite_error_guard,
 )
 from .event_book import EventBook
 from .idle_tools import IdleActivityToolset
@@ -319,9 +320,7 @@ def create_trace_dashboard(
 
     @app.post("/api/tools/{name}")
     def set_tool(name: str, setting: ToolSetting, request: Request):
-        origin = request.headers.get("origin", "")
-        if origin != f"http://{request.headers.get('host', '')}" or request.headers.get("x-dashboard") != "1":
-            raise HTTPException(403, "只接受本地页面的操作")
+        require_local_mutation(request)
         known = {item["name"] for item in tool_inventory([]) if item["main"] or item["idle"]}
         if name not in known:
             raise HTTPException(404, "工具未注册")
@@ -334,7 +333,7 @@ def create_trace_dashboard(
     @app.get("/api/senders")
     async def senders():
         store = get_memory_store()
-        with store._lock:
+        with sqlite_error_guard(), store._lock:
             rows = store.db.execute(
                 "SELECT m.account_id,m.sender_id,MAX(m.captured_at) AS last_seen,"
                 "COUNT(*) AS message_count,COALESCE(p.remark,'') AS remark "
@@ -402,11 +401,12 @@ def create_trace_dashboard(
                 or len(update.remark) > 120):
             raise HTTPException(400, "备注或联系人标识超出限制")
         try:
-            return get_memory_store().set_human_sender_remark(
-                account_id=update.account_id,
-                sender_id=update.sender_id,
-                remark=update.remark,
-            )
+            with sqlite_error_guard():
+                return get_memory_store().set_human_sender_remark(
+                    account_id=update.account_id,
+                    sender_id=update.sender_id,
+                    remark=update.remark,
+                )
         except KeyError as exc:
             raise HTTPException(404, "联系人不在当前账号的消息档案中") from exc
         except ValueError as exc:
@@ -440,7 +440,7 @@ def main(argv: list[str] | None = None) -> None:
     import uvicorn
 
     srv = local_config.load_local_runtime_config(ROOT).server
-    parser = argparse.ArgumentParser(description="Run local EchoLoom read-only trace dashboard")
+    parser = argparse.ArgumentParser(description="Run local EchoLoom trace and memory workbench")
     parser.add_argument("--host", default=srv.dashboard_host)
     parser.add_argument("--port", type=int, default=srv.dashboard_port)
     args = parser.parse_args(argv)

@@ -23,7 +23,19 @@ function el(tag, cls, text) {
 }
 function clear(node) { node.replaceChildren(); }
 function json(value) { return JSON.stringify(value, null, 2) ?? ''; }
-function shortTime(value) { return value && value !== '?' ? String(value).replace('T', ' ').slice(5, 16) : '时间未知'; }
+function shortTime(value) {
+  if (!value || value === '?') return '时间未知';
+  const raw = String(value).trim();
+  if (!raw) return '时间未知';
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    const dt = new Date(raw);
+    if (!Number.isNaN(dt.getTime())) {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+    }
+  }
+  return raw.replace('T', ' ').slice(5, 16);
+}
 function toast(text) {
   const n = $('#toast');
   n.textContent = text;

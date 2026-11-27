@@ -572,3 +572,12 @@ def test_tokenized_fact_and_note_search_handles_spaced_queries_and_cross_chat(tm
     assert len(all_hits) == 1
     assert all_hits[0]["conversation_id"] == "wxid_friend"
     store.close()
+
+
+def test_memory_store_enables_busy_timeout_and_wal(tmp_path):
+    store = MemoryStore(tmp_path / "busy.sqlite3")
+    try:
+        assert int(store.db.execute("PRAGMA busy_timeout").fetchone()[0]) == 5000
+        assert str(store.db.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
+    finally:
+        store.close()

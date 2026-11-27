@@ -19,6 +19,8 @@
     episodeConversation: '',
     createOpen: false,
     editingId: null,
+    summaryRequestId: 0,
+    requestId: 0,
     loaded: false,
   };
 
@@ -364,12 +366,17 @@
         const save = el('button', 'header-button primary-btn', '保存新版本');
         save.type = 'button';
         save.addEventListener('click', async () => {
+          const content = textarea.value.trim();
+          if (!content) {
+            toast('事实内容不能为空');
+            return;
+          }
           save.disabled = true;
           try {
             await mutate('/api/memory/facts', 'POST', {
               account_id: fact.account_id,
               fact_key: fact.fact_key,
-              content: textarea.value.trim(),
+              content,
               source_message_id: fact.source_message_id,
             });
             memState.editingId = null;
@@ -444,12 +451,18 @@
         const save = el('button', 'header-button primary-btn', '保存修改');
         save.type = 'button';
         save.addEventListener('click', async () => {
+          const content = contentInput.value.trim();
+          const exitCond = exitInput.value.trim();
+          if (!content || !exitCond) {
+            toast('请填写事件内容和退出条件');
+            return;
+          }
           save.disabled = true;
           try {
             const payload = {
               account_id: memState.accountId,
-              content: contentInput.value.trim(),
-              exit_condition: exitInput.value.trim(),
+              content,
+              exit_condition: exitCond,
             };
             if (clearBox.checked) payload.expires_at = 'clear';
             else if (expInput.value) payload.expires_at = toIsoWithOffset(expInput.value);
@@ -511,12 +524,17 @@
         const save = el('button', 'header-button primary-btn', '保存释义');
         save.type = 'button';
         save.addEventListener('click', async () => {
+          const explanation = expInput.value.trim();
+          if (!explanation) {
+            toast('词条释义不能为空');
+            return;
+          }
           save.disabled = true;
           try {
             await mutate('/api/memory/entities', 'POST', {
               account_id: item.account_id,
               term: item.term,
-              explanation: expInput.value.trim(),
+              explanation,
             });
             memState.editingId = null;
             toast(`已更新词条「${item.term}」`);
@@ -578,11 +596,16 @@
         const save = el('button', 'header-button primary-btn', '保存批注');
         save.type = 'button';
         save.addEventListener('click', async () => {
+          const content = textarea.value.trim();
+          if (!content) {
+            toast('批注内容不能为空');
+            return;
+          }
           save.disabled = true;
           try {
             await mutate(`/api/memory/annotations/${encodeURIComponent(note.note_id)}`, 'PATCH', {
               account_id: note.account_id,
-              content: textarea.value.trim(),
+              content,
             });
             memState.editingId = null;
             toast('批注已更新');
@@ -662,45 +685,59 @@
   }
 
   async function loadActiveTab() {
+    const reqId = ++memState.requestId;
+    const targetTab = memState.tab;
+    const targetAccount = memState.accountId;
+    const targetConv = memState.episodeConversation;
     const q = $('#memory-search').value.trim();
     const params = new URLSearchParams();
-    if (memState.accountId) params.set('account_id', memState.accountId);
+    if (targetAccount) params.set('account_id', targetAccount);
     if (q) params.set('q', q);
 
     try {
-      if (memState.tab === 'facts') {
+      if (targetTab === 'facts') {
         const data = await api(`/api/memory/facts?${params}`);
+        if (reqId !== memState.requestId) return;
         memState.facts = data.facts || [];
         memState.factIndexLimit = data.index_limit || 40;
-        if (memState.createOpen && !memState.recentMessages.length && memState.accountId) {
-          const rec = await api(`/api/memory/recent-messages?${new URLSearchParams({account_id: memState.accountId, limit: '30'})}`);
+        if (memState.createOpen && !memState.recentMessages.length && targetAccount) {
+          const rec = await api(`/api/memory/recent-messages?${new URLSearchParams({account_id: targetAccount, limit: '30'})}`);
+          if (reqId !== memState.requestId) return;
           memState.recentMessages = rec.messages || [];
         }
-      } else if (memState.tab === 'events') {
+      } else if (targetTab === 'events') {
         const data = await api(`/api/memory/events?${params}`);
+        if (reqId !== memState.requestId) return;
         memState.events = data.events || [];
         memState.quotas = data.quotas || null;
-      } else if (memState.tab === 'entities') {
+      } else if (targetTab === 'entities') {
         const data = await api(`/api/memory/entities?${params}`);
+        if (reqId !== memState.requestId) return;
         memState.entities = data.entities || [];
-      } else if (memState.tab === 'annotations') {
+      } else if (targetTab === 'annotations') {
         const data = await api(`/api/memory/annotations?${params}`);
+        if (reqId !== memState.requestId) return;
         memState.annotations = data.annotations || [];
-      } else if (memState.tab === 'episodes') {
-        if (memState.episodeConversation) params.set('conversation_id', memState.episodeConversation);
-        memState.episodesData = await api(`/api/memory/episodes?${params}`);
+      } else if (targetTab === 'episodes') {
+        if (targetConv) params.set('conversation_id', targetConv);
+        const data = await api(`/api/memory/episodes?${params}`);
+        if (reqId !== memState.requestId) return;
+        memState.episodesData = data;
       }
       renderList();
     } catch (error) {
-      toast(`记忆加载失败：${error.message}`);
+      if (reqId === memState.requestId) toast(`记忆加载失败：${error.message}`);
     }
   }
 
   async function refreshAll() {
+    const sumId = ++memState.summaryRequestId;
+    memState.recentMessages = [];
     try {
       const params = new URLSearchParams();
       if (memState.accountId) params.set('account_id', memState.accountId);
       const summary = await api(`/api/memory/summary?${params}`);
+      if (sumId !== memState.summaryRequestId) return;
       memState.summary = summary;
       memState.accounts = summary.accounts || [];
       memState.accountId = summary.account_id || '';
@@ -709,7 +746,7 @@
       renderStats();
       await loadActiveTab();
     } catch (error) {
-      toast(`记忆概览加载失败：${error.message}`);
+      if (sumId === memState.summaryRequestId) toast(`记忆概览加载失败：${error.message}`);
     }
   }
 
@@ -757,8 +794,22 @@
 
   window.EchoLoomMemory = {
     onActivate: async () => {
-      if (!memState.loaded) await refreshAll();
-      else renderStats();
+      if (!memState.loaded || (!memState.editingId && !memState.createOpen)) {
+        await refreshAll();
+        return;
+      }
+      const sumId = ++memState.summaryRequestId;
+      try {
+        const params = new URLSearchParams();
+        if (memState.accountId) params.set('account_id', memState.accountId);
+        const summary = await api(`/api/memory/summary?${params}`);
+        if (sumId !== memState.summaryRequestId) return;
+        memState.summary = summary;
+        memState.accounts = summary.accounts || [];
+        memState.accountId = summary.account_id || '';
+        renderAccountSelect();
+        renderStats();
+      } catch {}
     },
     refreshAll,
   };

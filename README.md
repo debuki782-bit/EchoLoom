@@ -44,7 +44,7 @@ EchoLoom includes a zero-build, loopback-only web workbench (`127.0.0.1` / `loca
 - **Conversations & Traces**: Read-only timeline of batched inputs, model requests, tool calls, and delivery receipts, with JSONL export.
 - **Tool Controls**: Enable or disable registered main-chat and idle tools live.
 - **Contact Profiles**: Edit human-owned `Remark` names, inspect fragmentation warnings (`>= 8` notes), and add or remove tags and `sender_memories`.
-- **Memory Library**: Browse, search, trace back to original source messages, edit inline, or delete `user_facts` (with Top-40 index visibility), `event_book` items (with slot quotas and 72h flags), `entity_terms`, `annotations`, and `episodes`. Every edit goes through `MemoryStore` / `EventBook` so audit logs and revision tables stay intact.
+- **Memory Library**: Browse, search, trace back to original source messages, edit inline, or delete `user_facts` (with Top-40 index visibility), `event_book` items (with slot quotas and 72h flags), `entity_terms`, `annotations`, and `episodes`. Structured memory edits go through `MemoryStore` / `EventBook` to preserve revision and audit history, while deleting an episode removes it from `episode-memory.sqlite3`.
 
 ---
 

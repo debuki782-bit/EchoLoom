@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
-from contextlib import closing
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from .event_book import EventBook
-from .memory_store import MemoryStore
+from .memory_store import MemoryStore, _like_escape
 
 VALID_SENDER_TOPICS = frozenset({"身份关系", "称呼", "偏好", "互动习惯", "承诺", "其他"})
 DASHBOARD_ACTOR = "dashboard-user"
@@ -76,6 +76,15 @@ def require_local_mutation(request: Request) -> None:
         or request.headers.get("x-dashboard") != "1"
     ):
         raise HTTPException(403, "只接受本地管理页面的操作")
+
+
+@contextmanager
+def sqlite_error_guard(detail: str = "数据库正忙，请稍后重试") -> Iterator[None]:
+    """Translate SQLite operational and lock errors into HTTP 503 responses."""
+    try:
+        yield
+    except sqlite3.Error as exc:
+        raise HTTPException(503, detail) from exc
 
 
 def _episode_table_exists(db: sqlite3.Connection) -> bool:
@@ -160,9 +169,9 @@ def _episode_stats(episode_db_path: Path | None, account_id: str) -> tuple[bool,
             )
             bloated = int(
                 ep_db.execute(
-                    "SELECT COUNT(*) FROM ("
+                    "SELECT COUNT(DISTINCT conversation_id) FROM ("
                     "SELECT conversation_id FROM episodes WHERE account_id=? "
-                    "GROUP BY conversation_id HAVING COUNT(*) >= ?"
+                    "GROUP BY conversation_id, model HAVING COUNT(*) >= ?"
                     ")",
                     (account_id, EPISODE_BLOAT_THRESHOLD),
                 ).fetchone()[0]
@@ -212,80 +221,83 @@ def register_memory_routes(
         store = get_memory_store()
         event_book = get_event_book()
         episode_path = get_episode_db_path()
-        accounts, selected = _resolve_account(store, episode_path, account_id)
-        if not selected:
-            ep_available, _, _ = _episode_stats(episode_path, "")
-            return {
-                "accounts": accounts,
-                "account_id": "",
-                "counts": {
-                    "facts_total": 0,
-                    "facts_in_index": 0,
-                    "fact_index_limit": FACT_INDEX_LIMIT,
-                    "events_high": 0,
-                    "events_high_limit": EventBook.HIGH_PRIORITY_SLOTS,
-                    "events_ordinary": 0,
-                    "events_ordinary_chars": 0,
-                    "events_ordinary_limit": EventBook.ORDINARY_TOTAL_CHARS,
-                    "events_stale_72h": 0,
-                    "entities_total": 0,
-                    "annotations_total": 0,
-                    "sender_memories_total": 0,
-                    "bloated_senders": 0,
-                    "episodes_available": ep_available,
-                    "episodes_total": 0,
-                    "episodes_bloated_chats": 0,
-                },
-            }
+        with sqlite_error_guard():
+            accounts, selected = _resolve_account(store, episode_path, account_id)
+            if not selected:
+                ep_available, _, _ = _episode_stats(episode_path, "")
+                return {
+                    "accounts": accounts,
+                    "account_id": "",
+                    "counts": {
+                        "facts_total": 0,
+                        "facts_in_index": 0,
+                        "fact_index_limit": FACT_INDEX_LIMIT,
+                        "events_high": 0,
+                        "events_high_limit": EventBook.HIGH_PRIORITY_SLOTS,
+                        "events_ordinary": 0,
+                        "events_ordinary_chars": 0,
+                        "events_ordinary_limit": EventBook.ORDINARY_TOTAL_CHARS,
+                        "events_stale_72h": 0,
+                        "entities_total": 0,
+                        "annotations_total": 0,
+                        "sender_memories_total": 0,
+                        "bloated_senders": 0,
+                        "episodes_available": ep_available,
+                        "episodes_total": 0,
+                        "episodes_bloated_chats": 0,
+                    },
+                }
 
-        events = event_book.list_entries(selected)
-        now = datetime.now(UTC)
-        high_events = [row for row in events if row["priority"] == "high"]
-        ordinary_events = [row for row in events if row["priority"] == "ordinary"]
-        stale_72h = sum(
-            1
-            for row in ordinary_events
-            if EventBook._elapsed_seconds(row["updated_at"], now) >= 72 * 60 * 60
-        )
-        ordinary_chars = sum(len(str(row["content"])) for row in ordinary_events)
+            events = event_book.list_entries(selected)
+            now = datetime.now(UTC)
+            high_events = [row for row in events if row["priority"] == "high"]
+            ordinary_events = [row for row in events if row["priority"] == "ordinary"]
+            stale_72h = sum(
+                1
+                for row in ordinary_events
+                if EventBook._elapsed_seconds(row["updated_at"], now) >= 72 * 60 * 60
+            )
+            ordinary_chars = sum(len(str(row["content"])) for row in ordinary_events)
 
-        with store._lock:
-            facts_total = int(
-                store.db.execute(
-                    "SELECT COUNT(*) FROM user_facts WHERE account_id=? AND state='active'",
-                    (selected,),
-                ).fetchone()[0]
-            )
-            entities_total = int(
-                store.db.execute(
-                    "SELECT COUNT(*) FROM entity_terms WHERE account_id=? AND state='active'",
-                    (selected,),
-                ).fetchone()[0]
-            )
-            annotations_total = int(
-                store.db.execute(
-                    "SELECT COUNT(*) FROM annotations WHERE account_id=? AND state='active'",
-                    (selected,),
-                ).fetchone()[0]
-            )
-            sender_memories_total = int(
-                store.db.execute(
-                    "SELECT COUNT(*) FROM sender_memories WHERE account_id=? AND state='active'",
-                    (selected,),
-                ).fetchone()[0]
-            )
-            bloated_senders = int(
-                store.db.execute(
-                    "SELECT COUNT(*) FROM ("
-                    "SELECT sender_id FROM sender_memories WHERE account_id=? AND state='active' "
-                    "GROUP BY sender_id HAVING COUNT(*) >= ?"
-                    ")",
-                    (selected, SENDER_BLOAT_THRESHOLD),
-                ).fetchone()[0]
-            )
+            with store._lock:
+                facts_total = int(
+                    store.db.execute(
+                        "SELECT COUNT(*) FROM user_facts WHERE account_id=? AND state='active'",
+                        (selected,),
+                    ).fetchone()[0]
+                )
+                entities_total = int(
+                    store.db.execute(
+                        "SELECT COUNT(*) FROM entity_terms WHERE account_id=? AND state='active'",
+                        (selected,),
+                    ).fetchone()[0]
+                )
+                annotations_total = int(
+                    store.db.execute(
+                        "SELECT COUNT(*) FROM annotations WHERE account_id=? AND state='active'",
+                        (selected,),
+                    ).fetchone()[0]
+                )
+                sender_memories_total = int(
+                    store.db.execute(
+                        "SELECT COUNT(*) FROM sender_memories "
+                        "WHERE account_id=? AND state='active'",
+                        (selected,),
+                    ).fetchone()[0]
+                )
+                bloated_senders = int(
+                    store.db.execute(
+                        "SELECT COUNT(*) FROM ("
+                        "SELECT sender_id FROM sender_memories "
+                        "WHERE account_id=? AND state='active' "
+                        "GROUP BY sender_id HAVING COUNT(*) >= ?"
+                        ")",
+                        (selected, SENDER_BLOAT_THRESHOLD),
+                    ).fetchone()[0]
+                )
 
-        indexed_keys = store.fact_key_index(account_id=selected, limit=FACT_INDEX_LIMIT)
-        ep_available, ep_total, ep_bloated = _episode_stats(episode_path, selected)
+            indexed_keys = store.fact_key_index(account_id=selected, limit=FACT_INDEX_LIMIT)
+            ep_available, ep_total, ep_bloated = _episode_stats(episode_path, selected)
         return {
             "accounts": accounts,
             "account_id": selected,
@@ -318,12 +330,13 @@ def register_memory_routes(
         if topic not in VALID_SENDER_TOPICS:
             raise HTTPException(400, "资料分类无效")
         try:
-            memory_id, created = get_memory_store().upsert_sender_memory(
-                account_id=payload.account_id.strip(),
-                sender_id=payload.sender_id.strip(),
-                topic=topic,
-                content=payload.content,
-            )
+            with sqlite_error_guard():
+                memory_id, created = get_memory_store().upsert_sender_memory(
+                    account_id=payload.account_id.strip(),
+                    sender_id=payload.sender_id.strip(),
+                    topic=topic,
+                    content=payload.content,
+                )
         except KeyError as exc:
             raise HTTPException(404, "联系人不在当前账号的消息档案中") from exc
         except ValueError as exc:
@@ -335,10 +348,11 @@ def register_memory_routes(
         require_local_mutation(request)
         if not account_id.strip() or not memory_id.strip():
             raise HTTPException(400, "缺少账号或资料 ID")
-        deleted = get_memory_store().delete_sender_memory(
-            account_id=account_id.strip(),
-            memory_id=memory_id.strip(),
-        )
+        with sqlite_error_guard():
+            deleted = get_memory_store().delete_sender_memory(
+                account_id=account_id.strip(),
+                memory_id=memory_id.strip(),
+            )
         if not deleted:
             raise HTTPException(404, "未找到对应的人物资料")
         return {"status": "deleted", "memory_id": memory_id}
@@ -346,13 +360,14 @@ def register_memory_routes(
     @app.post("/api/senders/tags")
     def update_sender_tags(payload: SenderTagsUpdate, request: Request):
         require_local_mutation(request)
-        result = get_memory_store().update_sender_tags(
-            account_id=payload.account_id.strip(),
-            sender_id=payload.sender_id.strip(),
-            action=payload.action.strip(),
-            tags=payload.tags,
-            source_task_id=DASHBOARD_ACTOR,
-        )
+        with sqlite_error_guard():
+            result = get_memory_store().update_sender_tags(
+                account_id=payload.account_id.strip(),
+                sender_id=payload.sender_id.strip(),
+                action=payload.action.strip(),
+                tags=payload.tags,
+                source_task_id=DASHBOARD_ACTOR,
+            )
         status = result.get("status")
         if status == "unavailable":
             raise HTTPException(404, str(result.get("reason") or "联系人不存在"))
@@ -365,24 +380,26 @@ def register_memory_routes(
     @app.get("/api/memory/facts")
     def list_facts(account_id: str = "", q: str = ""):
         store = get_memory_store()
-        _, selected = _resolve_account(store, get_episode_db_path(), account_id)
-        if not selected:
-            return {"account_id": "", "facts": [], "index_limit": FACT_INDEX_LIMIT}
-        indexed = store.fact_key_index(account_id=selected, limit=FACT_INDEX_LIMIT)
-        rank_by_key = {key: idx + 1 for idx, key in enumerate(indexed)}
-        with store._lock:
-            rows = store.db.execute(
-                "SELECT f.fact_id, f.account_id, f.fact_key, f.content, f.source_message_id, "
-                "f.author_id, f.trust_label, f.version, f.created_at, f.updated_at, "
-                "s.conversation_id AS src_conversation_id, s.sender_id AS src_sender_id, "
-                "s.body_text AS src_body_text, s.captured_at AS src_captured_at "
-                "FROM user_facts f "
-                "LEFT JOIN source_messages s ON s.message_id=f.source_message_id "
-                "AND s.account_id=f.account_id "
-                "WHERE f.account_id=? AND f.state='active' "
-                "ORDER BY f.updated_at DESC, f.fact_id DESC",
-                (selected,),
-            ).fetchall()
+        with sqlite_error_guard():
+            _, selected = _resolve_account(store, get_episode_db_path(), account_id)
+            if not selected:
+                return {"account_id": "", "facts": [], "index_limit": FACT_INDEX_LIMIT}
+            indexed = store.fact_key_index(account_id=selected, limit=FACT_INDEX_LIMIT)
+            rank_by_key = {key: idx + 1 for idx, key in enumerate(indexed)}
+            with store._lock:
+                rows = store.db.execute(
+                    "SELECT f.fact_id, f.account_id, f.fact_key, f.content, "
+                    "f.source_message_id, f.author_id, f.trust_label, f.version, "
+                    "f.created_at, f.updated_at, "
+                    "s.conversation_id AS src_conversation_id, s.sender_id AS src_sender_id, "
+                    "s.body_text AS src_body_text, s.captured_at AS src_captured_at "
+                    "FROM user_facts f "
+                    "LEFT JOIN source_messages s ON s.message_id=f.source_message_id "
+                    "AND s.account_id=f.account_id "
+                    "WHERE f.account_id=? AND f.state='active' "
+                    "ORDER BY f.updated_at DESC, f.fact_id DESC",
+                    (selected,),
+                ).fetchall()
         needle = q.strip().casefold()
         items = []
         for row in rows:
@@ -425,13 +442,14 @@ def register_memory_routes(
     def upsert_fact(payload: FactUpsert, request: Request):
         require_local_mutation(request)
         try:
-            fact_id = get_memory_store().remember_fact(
-                account_id=payload.account_id.strip(),
-                fact_key=payload.fact_key,
-                content=payload.content,
-                source_message_id=payload.source_message_id.strip(),
-                actor_id=DASHBOARD_ACTOR,
-            )
+            with sqlite_error_guard():
+                fact_id = get_memory_store().remember_fact(
+                    account_id=payload.account_id.strip(),
+                    fact_key=payload.fact_key,
+                    content=payload.content,
+                    source_message_id=payload.source_message_id.strip(),
+                    actor_id=DASHBOARD_ACTOR,
+                )
         except KeyError as exc:
             raise HTTPException(404, "来源消息不存在或已失效") from exc
         except ValueError as exc:
@@ -444,11 +462,12 @@ def register_memory_routes(
         if not account_id.strip() or not fact_id.strip():
             raise HTTPException(400, "缺少账号或事实 ID")
         try:
-            get_memory_store().delete_fact(
-                account_id=account_id.strip(),
-                fact_id=fact_id.strip(),
-                actor_id=DASHBOARD_ACTOR,
-            )
+            with sqlite_error_guard():
+                get_memory_store().delete_fact(
+                    account_id=account_id.strip(),
+                    fact_id=fact_id.strip(),
+                    actor_id=DASHBOARD_ACTOR,
+                )
         except KeyError as exc:
             raise HTTPException(404, "未找到对应的长期事实") from exc
         return {"status": "deleted", "fact_id": fact_id}
@@ -456,17 +475,19 @@ def register_memory_routes(
     @app.get("/api/memory/recent-messages")
     def recent_source_messages(account_id: str = "", limit: int = 30):
         store = get_memory_store()
-        _, selected = _resolve_account(store, get_episode_db_path(), account_id)
         bounded = max(1, min(limit, 80))
-        if not selected:
-            return {"account_id": "", "messages": []}
-        with store._lock:
-            rows = store.db.execute(
-                "SELECT message_id, conversation_id, sender_id, body_text, captured_at, direction "
-                "FROM source_messages WHERE account_id=? AND deleted_at IS NULL "
-                "ORDER BY captured_at DESC, message_id DESC LIMIT ?",
-                (selected, bounded),
-            ).fetchall()
+        with sqlite_error_guard():
+            _, selected = _resolve_account(store, get_episode_db_path(), account_id)
+            if not selected:
+                return {"account_id": "", "messages": []}
+            with store._lock:
+                rows = store.db.execute(
+                    "SELECT message_id, conversation_id, sender_id, "
+                    "body_text, captured_at, direction "
+                    "FROM source_messages WHERE account_id=? AND deleted_at IS NULL "
+                    "ORDER BY captured_at DESC, message_id DESC LIMIT ?",
+                    (selected, bounded),
+                ).fetchall()
         return {
             "account_id": selected,
             "messages": [
@@ -488,19 +509,20 @@ def register_memory_routes(
     def list_events(account_id: str = "", q: str = ""):
         store = get_memory_store()
         event_book = get_event_book()
-        _, selected = _resolve_account(store, get_episode_db_path(), account_id)
-        if not selected:
-            return {
-                "account_id": "",
-                "events": [],
-                "quotas": {
-                    "high_used": 0,
-                    "high_limit": EventBook.HIGH_PRIORITY_SLOTS,
-                    "ordinary_chars_used": 0,
-                    "ordinary_chars_limit": EventBook.ORDINARY_TOTAL_CHARS,
-                },
-            }
-        entries = event_book.list_entries(selected)
+        with sqlite_error_guard():
+            _, selected = _resolve_account(store, get_episode_db_path(), account_id)
+            if not selected:
+                return {
+                    "account_id": "",
+                    "events": [],
+                    "quotas": {
+                        "high_used": 0,
+                        "high_limit": EventBook.HIGH_PRIORITY_SLOTS,
+                        "ordinary_chars_used": 0,
+                        "ordinary_chars_limit": EventBook.ORDINARY_TOTAL_CHARS,
+                    },
+                }
+            entries = event_book.list_entries(selected)
         now = datetime.now(UTC)
         high_used = sum(1 for row in entries if row["priority"] == "high")
         ordinary_chars = sum(
@@ -543,13 +565,14 @@ def register_memory_routes(
     def create_event(payload: EventCreate, request: Request):
         require_local_mutation(request)
         try:
-            result = get_event_book().add(
-                account_id=payload.account_id.strip(),
-                priority=payload.priority.strip(),
-                content=payload.content,
-                exit_condition=payload.exit_condition,
-                expires_at=payload.expires_at,
-            )
+            with sqlite_error_guard():
+                result = get_event_book().add(
+                    account_id=payload.account_id.strip(),
+                    priority=payload.priority.strip(),
+                    content=payload.content,
+                    exit_condition=payload.exit_condition,
+                    expires_at=payload.expires_at,
+                )
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, str(exc)) from exc
         if result.get("status") != "saved":
@@ -560,13 +583,14 @@ def register_memory_routes(
     def update_event(event_id: str, payload: EventUpdate, request: Request):
         require_local_mutation(request)
         try:
-            result = get_event_book().update(
-                account_id=payload.account_id.strip(),
-                event_id=event_id.strip(),
-                content=payload.content,
-                exit_condition=payload.exit_condition,
-                expires_at=payload.expires_at,
-            )
+            with sqlite_error_guard():
+                result = get_event_book().update(
+                    account_id=payload.account_id.strip(),
+                    event_id=event_id.strip(),
+                    content=payload.content,
+                    exit_condition=payload.exit_condition,
+                    expires_at=payload.expires_at,
+                )
         except (TypeError, ValueError) as exc:
             raise HTTPException(400, str(exc)) from exc
         status = result.get("status")
@@ -581,10 +605,11 @@ def register_memory_routes(
         require_local_mutation(request)
         if not account_id.strip() or not event_id.strip():
             raise HTTPException(400, "缺少账号或事件 ID")
-        result = get_event_book().delete(
-            account_id=account_id.strip(),
-            event_id=event_id.strip(),
-        )
+        with sqlite_error_guard():
+            result = get_event_book().delete(
+                account_id=account_id.strip(),
+                event_id=event_id.strip(),
+            )
         if result.get("status") != "deleted":
             raise HTTPException(404, "未找到对应的活跃事件")
         return result
@@ -594,17 +619,18 @@ def register_memory_routes(
     @app.get("/api/memory/entities")
     def list_entities(account_id: str = "", q: str = ""):
         store = get_memory_store()
-        _, selected = _resolve_account(store, get_episode_db_path(), account_id)
-        if not selected:
-            return {"account_id": "", "entities": []}
-        with store._lock:
-            rows = store.db.execute(
-                "SELECT entity_id, account_id, term, explanation, author_id, trust_label, "
-                "version, created_at, updated_at "
-                "FROM entity_terms WHERE account_id=? AND state='active' "
-                "ORDER BY updated_at DESC, term ASC",
-                (selected,),
-            ).fetchall()
+        with sqlite_error_guard():
+            _, selected = _resolve_account(store, get_episode_db_path(), account_id)
+            if not selected:
+                return {"account_id": "", "entities": []}
+            with store._lock:
+                rows = store.db.execute(
+                    "SELECT entity_id, account_id, term, explanation, author_id, trust_label, "
+                    "version, created_at, updated_at "
+                    "FROM entity_terms WHERE account_id=? AND state='active' "
+                    "ORDER BY updated_at DESC, term ASC",
+                    (selected,),
+                ).fetchall()
         needle = q.strip().casefold()
         items = []
         for row in rows:
@@ -631,12 +657,13 @@ def register_memory_routes(
     def upsert_entity(payload: EntityUpsert, request: Request):
         require_local_mutation(request)
         try:
-            entity_id = get_memory_store().upsert_entity(
-                account_id=payload.account_id.strip(),
-                term=payload.term,
-                explanation=payload.explanation,
-                actor_id=DASHBOARD_ACTOR,
-            )
+            with sqlite_error_guard():
+                entity_id = get_memory_store().upsert_entity(
+                    account_id=payload.account_id.strip(),
+                    term=payload.term,
+                    explanation=payload.explanation,
+                    actor_id=DASHBOARD_ACTOR,
+                )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"status": "saved", "entity_id": entity_id}
@@ -647,11 +674,12 @@ def register_memory_routes(
         if not account_id.strip() or not entity_id.strip():
             raise HTTPException(400, "缺少账号或词条 ID")
         try:
-            get_memory_store().delete_entity(
-                account_id=account_id.strip(),
-                entity_id=entity_id.strip(),
-                actor_id=DASHBOARD_ACTOR,
-            )
+            with sqlite_error_guard():
+                get_memory_store().delete_entity(
+                    account_id=account_id.strip(),
+                    entity_id=entity_id.strip(),
+                    actor_id=DASHBOARD_ACTOR,
+                )
         except KeyError as exc:
             raise HTTPException(404, "未找到对应的词典词条") from exc
         return {"status": "deleted", "entity_id": entity_id}
@@ -661,11 +689,13 @@ def register_memory_routes(
     @app.get("/api/memory/annotations")
     def list_annotations(account_id: str = "", q: str = ""):
         store = get_memory_store()
-        _, selected = _resolve_account(store, get_episode_db_path(), account_id)
-        if not selected:
-            return {"account_id": "", "annotations": []}
-        with store._lock:
-            rows = store.db.execute(
+        q_clean = q.strip()
+        needle = q_clean.casefold()
+        with sqlite_error_guard():
+            _, selected = _resolve_account(store, get_episode_db_path(), account_id)
+            if not selected:
+                return {"account_id": "", "annotations": []}
+            sql = (
                 "SELECT a.note_id, a.account_id, a.message_id, a.author_kind, a.author_id, "
                 "a.trust_label, a.content, a.source, a.version, a.created_at, a.updated_at, "
                 "s.conversation_id AS src_conversation_id, s.sender_id AS src_sender_id, "
@@ -673,11 +703,20 @@ def register_memory_routes(
                 "FROM annotations a "
                 "LEFT JOIN source_messages s ON s.message_id=a.message_id "
                 "AND s.account_id=a.account_id "
-                "WHERE a.account_id=? AND a.state='active' "
-                "ORDER BY a.updated_at DESC, a.note_id DESC LIMIT 300",
-                (selected,),
-            ).fetchall()
-        needle = q.strip().casefold()
+                "WHERE a.account_id=? AND a.state='active'"
+            )
+            params: list[object] = [selected]
+            if q_clean:
+                pattern = f"%{_like_escape(q_clean)}%"
+                sql += (
+                    " AND (a.content LIKE ? ESCAPE '\\' "
+                    "OR COALESCE(s.body_text, '') LIKE ? ESCAPE '\\' "
+                    "OR COALESCE(s.conversation_id, '') LIKE ? ESCAPE '\\')"
+                )
+                params.extend((pattern, pattern, pattern))
+            sql += " ORDER BY a.updated_at DESC, a.note_id DESC LIMIT 300"
+            with store._lock:
+                rows = store.db.execute(sql, params).fetchall()
         items = []
         for row in rows:
             content = str(row["content"])
@@ -718,12 +757,13 @@ def register_memory_routes(
     def update_annotation(note_id: str, payload: AnnotationUpdate, request: Request):
         require_local_mutation(request)
         try:
-            version = get_memory_store().revise_note(
-                account_id=payload.account_id.strip(),
-                note_id=note_id.strip(),
-                content=payload.content,
-                actor_id=DASHBOARD_ACTOR,
-            )
+            with sqlite_error_guard():
+                version = get_memory_store().revise_note(
+                    account_id=payload.account_id.strip(),
+                    note_id=note_id.strip(),
+                    content=payload.content,
+                    actor_id=DASHBOARD_ACTOR,
+                )
         except KeyError as exc:
             raise HTTPException(404, "未找到可编辑的消息批注") from exc
         except ValueError as exc:
@@ -736,12 +776,13 @@ def register_memory_routes(
         if not account_id.strip() or not note_id.strip():
             raise HTTPException(400, "缺少账号或批注 ID")
         try:
-            version = get_memory_store().revise_note(
-                account_id=account_id.strip(),
-                note_id=note_id.strip(),
-                content=None,
-                actor_id=DASHBOARD_ACTOR,
-            )
+            with sqlite_error_guard():
+                version = get_memory_store().revise_note(
+                    account_id=account_id.strip(),
+                    note_id=note_id.strip(),
+                    content=None,
+                    actor_id=DASHBOARD_ACTOR,
+                )
         except KeyError as exc:
             raise HTTPException(404, "未找到可删除的消息批注") from exc
         return {"status": "deleted", "note_id": note_id, "version": version}
@@ -752,16 +793,18 @@ def register_memory_routes(
     def list_episodes(account_id: str = "", conversation_id: str = "", q: str = ""):
         store = get_memory_store()
         episode_path = get_episode_db_path()
-        _, selected = _resolve_account(store, episode_path, account_id)
-        if episode_path is None or not episode_path.is_file():
-            return {
-                "account_id": selected,
-                "available": False,
-                "bloat_threshold": EPISODE_BLOAT_THRESHOLD,
-                "conversations": [],
-                "episodes": [],
-            }
-        try:
+        q_clean = q.strip()
+        needle = q_clean.casefold()
+        with sqlite_error_guard("无法读取事件记忆数据库"):
+            _, selected = _resolve_account(store, episode_path, account_id)
+            if episode_path is None or not episode_path.is_file():
+                return {
+                    "account_id": selected,
+                    "available": False,
+                    "bloat_threshold": EPISODE_BLOAT_THRESHOLD,
+                    "conversations": [],
+                    "episodes": [],
+                }
             with closing(sqlite3.connect(episode_path, timeout=5.0)) as ep_db:
                 ep_db.row_factory = sqlite3.Row
                 if not _episode_table_exists(ep_db):
@@ -780,24 +823,40 @@ def register_memory_routes(
                         "conversations": [],
                         "episodes": [],
                     }
-                conv_rows = ep_db.execute(
-                    "SELECT conversation_id, COUNT(*) AS cnt, MAX(updated_at) AS newest_at "
+                model_rows = ep_db.execute(
+                    "SELECT conversation_id, model, COUNT(*) AS cnt, MAX(updated_at) AS newest_at "
                     "FROM episodes WHERE account_id=? "
-                    "GROUP BY conversation_id ORDER BY cnt DESC, newest_at DESC",
+                    "GROUP BY conversation_id, model",
                     (selected,),
                 ).fetchall()
+                total_by_conv: dict[str, int] = {}
+                max_model_by_conv: dict[str, int] = {}
+                newest_by_conv: dict[str, str] = {}
+                count_by_conv_model: dict[tuple[str, str], int] = {}
+                for row in model_rows:
+                    conv = str(row["conversation_id"])
+                    model_name = str(row["model"])
+                    cnt = int(row["cnt"])
+                    newest = str(row["newest_at"])
+                    total_by_conv[conv] = total_by_conv.get(conv, 0) + cnt
+                    max_model_by_conv[conv] = max(max_model_by_conv.get(conv, 0), cnt)
+                    if newest > newest_by_conv.get(conv, ""):
+                        newest_by_conv[conv] = newest
+                    count_by_conv_model[(conv, model_name)] = cnt
+                sorted_convs = sorted(
+                    total_by_conv,
+                    key=lambda conv: (total_by_conv[conv], newest_by_conv[conv]),
+                    reverse=True,
+                )
                 conversations = [
                     {
-                        "conversation_id": str(row["conversation_id"]),
-                        "count": int(row["cnt"]),
-                        "newest_at": str(row["newest_at"]),
-                        "bloated": int(row["cnt"]) >= EPISODE_BLOAT_THRESHOLD,
+                        "conversation_id": conv,
+                        "count": total_by_conv[conv],
+                        "newest_at": newest_by_conv[conv],
+                        "bloated": max_model_by_conv[conv] >= EPISODE_BLOAT_THRESHOLD,
                     }
-                    for row in conv_rows
+                    for conv in sorted_convs
                 ]
-                count_by_conv: dict[str, int] = {
-                    str(row["conversation_id"]): int(row["cnt"]) for row in conv_rows
-                }
 
                 sql = (
                     "SELECT id, account_id, conversation_id, summary, updated_at, model "
@@ -807,6 +866,13 @@ def register_memory_routes(
                 if conversation_id.strip():
                     sql += " AND conversation_id=?"
                     params.append(conversation_id.strip())
+                if q_clean:
+                    pattern = f"%{_like_escape(q_clean)}%"
+                    sql += (
+                        " AND (summary LIKE ? ESCAPE '\\' "
+                        "OR conversation_id LIKE ? ESCAPE '\\')"
+                    )
+                    params.extend((pattern, pattern))
                 sql += " ORDER BY updated_at DESC, id DESC LIMIT 300"
                 ep_rows = ep_db.execute(sql, params).fetchall()
 
@@ -824,11 +890,8 @@ def register_memory_routes(
                         mid = str(src_row["message_id"])
                         sources_by_ep.setdefault(eid, []).append(mid)
                         all_message_ids.append(mid)
-        except sqlite3.Error as exc:
-            raise HTTPException(503, "无法读取事件记忆数据库") from exc
 
-        previews = _source_previews(store, selected, all_message_ids)
-        needle = q.strip().casefold()
+            previews = _source_previews(store, selected, all_message_ids)
         episodes = []
         for row in ep_rows:
             summary = str(row["summary"])
@@ -836,7 +899,9 @@ def register_memory_routes(
             if needle and needle not in f"{summary} {conv}".casefold():
                 continue
             eid = str(row["id"])
+            model_name = str(row["model"])
             mids = sources_by_ep.get(eid, [])
+            conv_model_cnt = count_by_conv_model.get((conv, model_name), 1)
             episodes.append(
                 {
                     "id": eid,
@@ -844,9 +909,9 @@ def register_memory_routes(
                     "conversation_id": conv,
                     "summary": summary,
                     "updated_at": str(row["updated_at"]),
-                    "model": str(row["model"]),
-                    "conversation_count": count_by_conv.get(conv, 1),
-                    "conversation_bloated": count_by_conv.get(conv, 1) >= EPISODE_BLOAT_THRESHOLD,
+                    "model": model_name,
+                    "conversation_count": total_by_conv.get(conv, 1),
+                    "conversation_bloated": conv_model_cnt >= EPISODE_BLOAT_THRESHOLD,
                     "source_message_ids": mids,
                     "sources": [previews[mid] for mid in mids if mid in previews],
                 }

@@ -353,3 +353,116 @@ def test_dashboard_memory_workbench_end_to_end(tmp_path, monkeypatch):
         with sqlite3.connect(episode_db) as ep_db:
             assert ep_db.execute("SELECT COUNT(*) FROM episode_sources WHERE episode_id='ep_0'").fetchone()[0] == 0
 
+
+def test_dashboard_memory_search_past_300_bloat_per_model_and_sqlite_busy(tmp_path, monkeypatch):
+    monkeypatch.setattr(tool_policy, "POLICY_PATH", tmp_path / "controls.sqlite3")
+    memory_db = tmp_path / "agent-memory.sqlite3"
+    episode_db = tmp_path / "episode-memory.sqlite3"
+    store = MemoryStore(memory_db)
+    stored_msg = store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="wxid_alice",
+        sender_id="wxid_alice",
+        raw_envelope={"msglist": [{"msgsvrid": 2001}]},
+        body_text="测试消息正文",
+    )
+    old_note = store.add_note(
+        account_id="wxid_bot",
+        message_id=stored_msg.message_id,
+        content="历史批注 needle_alpha",
+    )
+    store.db.execute("PRAGMA synchronous=OFF")
+    for idx in range(305):
+        store.add_note(
+            account_id="wxid_bot",
+            message_id=stored_msg.message_id,
+            content=f"较新批注 {idx}",
+        )
+    with store.transaction():
+        store.db.execute(
+            "UPDATE annotations SET updated_at='2020-01-01T00:00:00+00:00' WHERE note_id=?",
+            (old_note,),
+        )
+    store.db.execute("PRAGMA synchronous=NORMAL")
+    store.close()
+
+    with sqlite3.connect(episode_db) as ep_db:
+        ep_db.executescript(
+            "CREATE TABLE episodes ("
+            "id TEXT PRIMARY KEY, account_id TEXT NOT NULL, conversation_id TEXT NOT NULL, "
+            "summary TEXT NOT NULL, updated_at TEXT NOT NULL, model TEXT NOT NULL, vector BLOB NOT NULL);"
+            "CREATE TABLE episode_sources ("
+            "episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE, "
+            "message_id TEXT NOT NULL, PRIMARY KEY (episode_id, message_id));"
+        )
+        rows = [
+            ("ep_oldest", "wxid_bot", "wxid_old", "陈年事件 needle_beta", "2020-01-01T00:00:00+00:00", "m-a", b"\x00")
+        ]
+        rows.extend(
+            (f"ep_new_{idx}", "wxid_bot", "wxid_recent", f"常规摘要 {idx}", f"2026-06-01T00:{idx // 60:02d}:{idx % 60:02d}+00:00", f"m-{idx // 10}", b"\x00")
+            for idx in range(305)
+        )
+        for idx in range(6):
+            rows.append((f"ep_split_a_{idx}", "wxid_bot", "wxid_split", f"模型A {idx}", "2026-06-02T00:00:00+00:00", "m-a", b"\x00"))
+            rows.append((f"ep_split_b_{idx}", "wxid_bot", "wxid_split", f"模型B {idx}", "2026-06-02T00:00:00+00:00", "m-b", b"\x00"))
+        ep_db.executemany("INSERT INTO episodes VALUES (?,?,?,?,?,?,?)", rows)
+
+    app = create_trace_dashboard(
+        tmp_path,
+        memory_db_path=memory_db,
+        episode_db_path=episode_db,
+    )
+    headers = {"origin": "http://127.0.0.1:8767", "x-dashboard": "1"}
+
+    with TestClient(app, base_url="http://127.0.0.1:8767") as client:
+        css_text = client.get("/assets/style.css").text
+        assert "#export-jsonl{display:none}" in css_text
+        assert ".header-button{display:none}" not in css_text
+
+        unfiltered_notes = client.get("/api/memory/annotations", params={"account_id": "wxid_bot"}).json()["annotations"]
+        assert len(unfiltered_notes) == 300
+        assert all(item["note_id"] != old_note for item in unfiltered_notes)
+        searched_notes = client.get(
+            "/api/memory/annotations",
+            params={"account_id": "wxid_bot", "q": "needle_alpha"},
+        ).json()["annotations"]
+        assert [item["note_id"] for item in searched_notes] == [old_note]
+
+        unfiltered_eps = client.get("/api/memory/episodes", params={"account_id": "wxid_bot"}).json()["episodes"]
+        assert len(unfiltered_eps) == 300
+        assert all(item["id"] != "ep_oldest" for item in unfiltered_eps)
+        searched_eps_res = client.get(
+            "/api/memory/episodes",
+            params={"account_id": "wxid_bot", "q": "needle_beta"},
+        ).json()
+        assert [item["id"] for item in searched_eps_res["episodes"]] == ["ep_oldest"]
+
+        # wxid_split has 6 + 6 across two models -> below 12 per (conversation_id, model)
+        split_conv = next(c for c in searched_eps_res["conversations"] if c["conversation_id"] == "wxid_split")
+        assert split_conv["count"] == 12
+        assert split_conv["bloated"] is False
+        summary_counts = client.get("/api/memory/summary", params={"account_id": "wxid_bot"}).json()["counts"]
+        assert summary_counts["episodes_bloated_chats"] == 0
+
+        # Simulate SQLite busy error from domain layer -> HTTP 503 via sqlite_error_guard
+        def _raise_locked(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(MemoryStore, "remember_fact", _raise_locked)
+        monkeypatch.setattr(MemoryStore, "set_human_sender_remark", _raise_locked)
+        assert client.post(
+            "/api/memory/facts",
+            json={
+                "account_id": "wxid_bot",
+                "fact_key": "k",
+                "content": "v",
+                "source_message_id": stored_msg.message_id,
+            },
+            headers=headers,
+        ).status_code == 503
+        assert client.post(
+            "/api/senders/remark",
+            json={"account_id": "wxid_bot", "sender_id": "wxid_alice", "remark": "Alice"},
+            headers=headers,
+        ).status_code == 503
+
