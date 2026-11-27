@@ -21,6 +21,11 @@ from fastapi.testclient import TestClient
 
 from echoloom.conversation_scheduler import ConversationScheduler
 from echoloom.dispatcher import Dispatcher
+from echoloom.dispatcher_support import (
+    DispatcherOptions,
+    DispatcherPorts,
+    DispatcherRuntimeHooks,
+)
 from echoloom.ingress import Ingress, create_ingress_app, sha
 from echoloom.models import ReplyDraft
 from echoloom.pilot import Pilot
@@ -212,13 +217,14 @@ def test_scheme_a_dual_wal_ipc_callback_heartbeat_inflight_and_completion(tmp_pa
                 ACCOUNT,
                 ROOM,
                 fake_reply,
-                fake_send,
-                limit=None,
-                is_paused=lambda: bool(
-                    worker_db.execute("SELECT paused FROM control WHERE id=1").fetchone()[0]
+                ports=DispatcherPorts(send=fake_send),
+                hooks=DispatcherRuntimeHooks(
+                    is_paused=lambda: bool(
+                        worker_db.execute("SELECT paused FROM control WHERE id=1").fetchone()[0]
+                    ),
+                    is_source_ready=lambda: True,
                 ),
-                is_wechat_ready=lambda: True,
-                heartbeat_interval_seconds=0.2,
+                options=DispatcherOptions(limit=None, heartbeat_interval_seconds=0.2),
             )
             task = asyncio.create_task(dispatcher.run_worker())
             worker_stop["loop"] = asyncio.get_running_loop()

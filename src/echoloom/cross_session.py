@@ -10,6 +10,7 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
 from .contacts import ContactIdentity, is_contact_id, is_group_conversation, is_room_id
@@ -302,6 +303,8 @@ class CrossSessionService:
             rows.extend(self._query_message_dict(row) for row in (target, *following))
             matched_count = len(rows)
         else:
+            start: datetime | None
+            end: datetime | None
             if not query_text and not start_at and not end_at:
                 end = datetime.now(UTC)
                 start = end - timedelta(hours=24)
@@ -406,7 +409,7 @@ class CrossSessionService:
             if conv_ref:
                 row["conversation_ref"] = conv_ref
 
-        bounded = []
+        bounded: list[dict[str, Any]] = []
         for source in enriched:
             row = dict(source)
             body = row.get("body_text")
@@ -433,32 +436,34 @@ class CrossSessionService:
                         was_truncated = True
                         if encoded_size() <= budget:
                             break
-                if encoded_size() > budget and isinstance(row.get("body_text"), str):
-                    original = row["body_text"]
+                body_text = row.get("body_text")
+                if encoded_size() > budget and isinstance(body_text, str):
+                    original = body_text
                     if original.startswith("*{") and original.endswith("}*"):
                         original = original[2:-2]
                     marker = "…（较早正文已截断）…"
                     low, high, best = 0, len(original), render_message_body(marker)
                     while low <= high:
                         keep = (low + high) // 2
-                        row["body_text"] = render_message_body(
+                        rendered = render_message_body(
                             marker + (original[-keep:] if keep else "")
                         )
+                        row["body_text"] = rendered
                         if encoded_size() <= budget:
-                            best = row["body_text"]
+                            best = rendered
                             low = keep + 1
                         else:
                             high = keep - 1
                     row["body_text"] = best
                     was_truncated = True
                 if encoded_size() > budget:
-                    keep = (
+                    keep_fields = (
                         "message_id", "short_ref", "conversation_id", "conversation_ref",
                         "sender_id", "sender_ref", "captured_at",
                         "direction", "message_type", "display_name", "conversation_name",
                         "body_text",
                     )
-                    bounded[0] = {key: row[key] for key in keep if key in row}
+                    bounded[0] = {key: row[key] for key in keep_fields if key in row}
                 break
             bounded.pop(removable)
             was_truncated = True
@@ -973,7 +978,7 @@ class CrossSessionService:
     def _bound_rows(
         self, rows: list[dict[str, object]], *, wrap_message_bodies: bool = True
     ) -> list[dict[str, object]]:
-        bounded = []
+        bounded: list[dict[str, Any]] = []
         for source in rows:
             row = dict(source)
             body = row.get("body_text")

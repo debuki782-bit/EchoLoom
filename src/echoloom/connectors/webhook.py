@@ -15,6 +15,7 @@ import time
 from collections import deque
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -109,7 +110,7 @@ class WebhookConnector:
         elif isinstance(payload, dict):
             raw_items = [payload]
         else:
-            raise ValueError("webhook payload must be an object or contain an events list")
+            raise TypeError("webhook payload must be an object or contain an events list")
         if not 1 <= len(raw_items) <= 64:
             raise ValueError("webhook events count must be between 1 and 64")
 
@@ -119,7 +120,7 @@ class WebhookConnector:
         events: list[MessageEvent] = []
         for idx, row in enumerate(raw_items):
             if not isinstance(row, dict):
-                raise ValueError("webhook event entry must be an object")
+                raise TypeError("webhook event entry must be an object")
             account_id = str(row.get("account_id") or self.default_account_id).strip()
             conversation_id = str(row.get("conversation_id") or "").strip()
             sender_id = str(row.get("sender_id") or "").strip()
@@ -150,13 +151,13 @@ class WebhookConnector:
             if isinstance(raw_msg_id, int) and not isinstance(raw_msg_id, bool) and raw_msg_id > 0:
                 source_msg_id = raw_msg_id
 
-            original_type = 1
+            content_kind = "text"
             text = ""
             if kind in ("text", "message"):
                 text = str(row.get("text") if row.get("text") is not None else row.get("content") or "")
-                original_type = 1
+                content_kind = "text"
             elif kind in ("image", "sticker"):
-                original_type = 47 if kind == "sticker" else 3
+                content_kind = kind
                 image_key = str(row.get("image_id") or hashlib.sha256(
                     f"{account_id}:{conversation_id}:{sender_id}:{capture_tick_ms}:{idx}".encode()
                 ).hexdigest()[:16])
@@ -176,7 +177,7 @@ class WebhookConnector:
                     body_obj["media_kind"] = "sticker"
                 text = json.dumps(body_obj, ensure_ascii=False)
             elif kind in ("voice", "audio"):
-                original_type = 34
+                content_kind = "voice"
                 voice_key = f"{conversation_id}:{sender_id}:{capture_tick_ms}"
                 audio_b64 = row.get("audio_base64")
                 if isinstance(audio_b64, str) and audio_b64:
@@ -191,7 +192,7 @@ class WebhookConnector:
                     self.voices[conversation_id] = self.voices[voice_key]
                 text = json.dumps({"kind": "voice_message"}, ensure_ascii=False)
             elif kind in ("link", "card", "app_message"):
-                original_type = 49
+                content_kind = "app"
                 card: dict[str, object] = {
                     "kind": "app_message",
                     "text": str(row.get("title") or row.get("text") or "")[:8192],
@@ -204,8 +205,9 @@ class WebhookConnector:
                     card["description"] = desc[:8192]
                 text = json.dumps(card, ensure_ascii=False)
             elif kind in ("quote", "reply"):
-                original_type = 49
-                quote_raw = row.get("quote") if isinstance(row.get("quote"), Mapping) else {}
+                content_kind = "quote"
+                raw_quote = row.get("quote")
+                quote_raw: Mapping[str, Any] = raw_quote if isinstance(raw_quote, Mapping) else {}
                 text = json.dumps(
                     {
                         "kind": "quoted_message",
@@ -224,7 +226,7 @@ class WebhookConnector:
                     ensure_ascii=False,
                 )
             elif kind == "pat":
-                original_type = 10002
+                content_kind = "pat"
                 target_id = str(row.get("target_id") or account_id).strip()
                 text = json.dumps(
                     {
@@ -255,10 +257,9 @@ class WebhookConnector:
                     capture_tick_ms=capture_tick_ms,
                     raw_envelope_json=envelope_json,
                     raw_message_json=raw_msg_json,
-                    original_message_type=original_type,
                     source_id=self.source_id,
                     channel=channel,
-                    content_kind=kind,
+                    content_kind=content_kind,
                 )
             )
         return tuple(events)
@@ -323,7 +324,9 @@ class WebhookConnector:
     def _can_send(self, account_id: str, conversation_id: str) -> bool:
         return not self.closed and self.config.send_enabled and bool(account_id and conversation_id)
 
-    def _post_outbound(self, body: dict[str, object]) -> tuple[str, str]:
+    def _post_outbound(
+        self, body: dict[str, object]
+    ) -> tuple[Literal["accepted_by_server", "rejected", "unknown", "queued"], str]:
         self.outbound.append(body)
         if not self.outbound_url:
             return "queued", "webhook_recorded_locally_no_outbound_url"
@@ -368,7 +371,9 @@ class WebhookConnector:
                 "event_id": draft.event_id,
             }
         )
-        mapped = "queued" if status == "accepted_by_server" else status
+        mapped: Literal["rejected", "queued", "unknown"] = (
+            "queued" if status == "accepted_by_server" else status
+        )
         return SendResult(mapped, reason)
 
     def send_image(self, conversation_id: str, path: Path) -> tuple[str, str | None]:

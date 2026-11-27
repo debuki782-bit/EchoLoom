@@ -13,6 +13,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from .db_async import db_lock
 from .freshness_policy import PendingInboundSnapshot
@@ -119,6 +120,9 @@ class ConversationScheduler:
                 "source_msg_id": item.source_msg_id,
                 "capture_tick_ms": item.capture_tick_ms,
                 "original_message_type": item.original_message_type,
+                "source_id": item.source_id,
+                "channel": item.channel,
+                "content_kind": item.content_kind,
                 "raw_message_json": item.raw_message_json,
                 "event_time_context": item.event_time_context,
             },
@@ -641,7 +645,7 @@ class ConversationScheduler:
     @classmethod
     def _prefix_within_text_budget(cls, rows):
         """Choose a FIFO prefix; a single long message is processed whole."""
-        selected = []
+        selected: list[Any] = []
         total = 0
         for row in rows:
             payload = json.loads(row["payload_json"])
@@ -838,4 +842,7 @@ class ConversationScheduler:
             raw_message_json=value.get("raw_message_json", ""),
             original_message_type=value.get("original_message_type"),
             event_time_context=value.get("event_time_context"),
+            source_id=value.get("source_id", "default"),
+            channel=value.get("channel", "wechat"),
+            content_kind=value.get("content_kind", "text"),
         )

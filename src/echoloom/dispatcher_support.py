@@ -9,14 +9,87 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
-from .channel_gateway import SendResult
+from .channel_gateway import MessageEvent, SendResult, default_archive_envelope
 from .context import ContextWindow
 from .context_assembler import AssembledBatch
 from .conversation_scheduler import ConversationScheduler, MessageBatch
 from .memory_store import MemoryStore
 from .models import ReplyDraft
 from .outbound import OutboundService
+
+if TYPE_CHECKING:
+    from .contacts import ContactIdentity
+    from .context_assembler import MessageContextAssembler
+    from .context_builder import ContextBuilder
+    from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
+    from .message_ingestor import MessageIngestor
+    from .temporal_context import DailyEnvironmentProvider
+
+
+@dataclass(frozen=True)
+class DispatcherPorts:
+    """Outbound delivery, media/memory stores, and context assembly dependencies."""
+
+    send: Callable[[ReplyDraft], SendResult] | None = None
+    outbound: OutboundService | None = None
+    resolve_contact: Callable[[str], ContactIdentity | None] | None = None
+    memory_store: MemoryStore | None = None
+    image_ingestor: WeChatImageIngestor | None = None
+    voice_ingestor: WeChatVoiceIngestor | None = None
+    file_ingestor: WeChatFileIngestor | None = None
+    daily_environment: DailyEnvironmentProvider | None = None
+    record_activity: Callable[[str, str], Awaitable[None]] | None = None
+    delivery_state: Callable[[str], dict[str, object]] | None = None
+    record_send_result: Callable[[str, str, str | None], int] | None = None
+    pending_delivery_notices: Callable[[], list[dict[str, object]]] | None = None
+    acknowledge_delivery_notices: Callable[[tuple[str, ...]], None] | None = None
+    record_delivery_notice: Callable[[str, str, str | None, int], None] | None = None
+    context_assembler: MessageContextAssembler | None = None
+    message_ingestor: MessageIngestor | None = None
+    context_builder: ContextBuilder | None = None
+    archive_envelope: Callable[..., dict[str, Any]] = default_archive_envelope
+    special_command_handler: Callable[[MessageEvent], Awaitable[str | None]] | None = None
+    account_aliases_provider: Callable[[str], Sequence[str]] | None = None
+
+
+@dataclass(frozen=True)
+class DispatcherRuntimeHooks:
+    """Runtime readiness checks, circuit/budget callbacks, and follow-up coordination."""
+
+    provider_check: Callable[[], Awaitable[bool]] | None = None
+    on_model_indeterminate: Callable[[], Awaitable[None] | None] | None = None
+    in_scope: Callable[[MessageEvent], bool] | None = None
+    is_paused: Callable[[], bool] | None = None
+    is_source_ready: Callable[[], bool] | None = None
+    on_budget_recovered: Callable[[MessageEvent], None] | None = None
+    blocked_conversations_provider: Callable[[], set[tuple[str, str]]] | None = None
+    is_followup_scheduled: Callable[[str, str], bool] | None = None
+    get_cancelled_followup: Callable[[str, str], int | None] | None = None
+    clear_cancelled_followup: Callable[[str, str, int], None] | None = None
+    followup_factory: (
+        Callable[[ContextWindow, str], Callable[[str, int], Awaitable[dict[str, object]]]] | None
+    ) = None
+    scheduled_followups_count: Callable[[], int] | None = None
+    drain_queue: Callable[[], None] | None = None
+
+
+@dataclass(frozen=True)
+class DispatcherOptions:
+    """Tuning limits, circuit cooldowns, and worker loop timing parameters."""
+
+    limit: int | None = 6
+    max_user_bytes: int = 32_000
+    max_user_bytes_for_conversation: Callable[[str, str], int] | None = None
+    provider_probe_base_seconds: float = 5.0
+    provider_probe_max_seconds: float = 30.0
+    indeterminate_cooldown_base_seconds: float = 30.0
+    indeterminate_cooldown_max_seconds: float = 600.0
+    worker_id: str = "default"
+    heartbeat_interval_seconds: float = 2.0
+    process_timeout_seconds: float = 180.0
+    max_freshness_holds: int = 1
 
 
 def account_aliases_for_context(
@@ -253,7 +326,7 @@ class CallbackOutboundAdapter:
         self._record_send_result = record_send_result
         self._record_delivery_notice = record_delivery_notice
         self.memory_store = memory_store
-        self._fallback: dict[str, dict[str, object]] = {}
+        self._fallback: dict[str, dict[str, Any]] = {}
 
     def can_send(self) -> bool:
         return True

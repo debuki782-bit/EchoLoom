@@ -60,7 +60,6 @@ function Find-VsTool([string]$findPattern, [string]$requires = '') {
 function Resolve-Python {
     foreach ($candidate in @(
         $env:ECHOLOOM_PYTHON,
-        (Join-Path $repoRoot '.venv-openai\Scripts\python.exe'),
         (Join-Path $repoRoot '.venv\Scripts\python.exe')
     )) {
         if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }

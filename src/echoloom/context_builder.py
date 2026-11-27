@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Literal
 
+from .connectors.base import canonical_content_kind
 from .contacts import (
     ContactIdentity,
     apply_sender_remarks,
@@ -35,6 +37,8 @@ from .rich_message import pat_participant_ids, quoted_author_id, quoted_message_
 from .temporal_context import DailyEnvironmentProvider, message_time_context
 from .time_scheduler import TimeScheduler
 from .wechat_gateway import MessageEvent
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -364,7 +368,7 @@ class ContextBuilder:
                 if quote_ref:
                     quote_requests.append((index, item.account_id, quote_ref))
 
-            if item.original_message_type in (None, 1):
+            if canonical_content_kind(item) == "text":
                 quote_context = (
                     item.sender_id,
                     "",
@@ -647,7 +651,8 @@ class ContextBuilder:
         if spec.include_daily_env and self.daily_environment is not None:
             try:
                 daily = await asyncio.to_thread(self.daily_environment.system_prompt_context)
-            except Exception:  # noqa: BLE001 - weather must not block message handling
+            except Exception as exc:  # noqa: BLE001 - weather must not block message handling
+                logger.warning("event=daily_env_unavailable error_type=%s", type(exc).__name__)
                 daily = "本地天气暂不可用；不要猜测或编造天气。"
 
         idle_summaries: tuple[str, ...] = ()

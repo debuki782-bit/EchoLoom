@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from . import local_config
 from .channel_gateway import ChannelConnector
@@ -102,12 +102,18 @@ class ServiceBundle:
     profile_tools: Callable[[AgentProfile, Any], list[Any]]
 
 
+class RunnerForFn(Protocol):
+    """Callable returning a cached profile runtime with optional model override."""
+
+    def __call__(self, profile: AgentProfile, model_id: str | None = None) -> Any: ...
+
+
 @dataclass
 class RunnerBundle:
     """Profile chat runner cache, idle runners, reply dispatcher, and owner commands."""
 
     runner_cache: dict[tuple[str, str], Any]
-    runner_for: Callable[[AgentProfile, str | None], Any]
+    runner_for: RunnerForFn
     runner_for_conversation: Callable[[str], Any]
     idle_runners: dict[str, Any]
     reply_with_profile: Callable[[Any], Awaitable[str]]

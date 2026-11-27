@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_profiles import AgentProfile, AgentProfiles
+from .connectors.base import canonical_content_kind
 from .model_catalog import load_model_catalog
 from .runtime_route import ProviderBundle, RunnerBundle, ServiceBundle
 
@@ -181,7 +182,7 @@ def build_runners(
     async def handle_special_command(item) -> str | None:
         if item.sender_id not in profile_config.command_owner_ids:
             return None
-        if item.original_message_type not in (None, 1):
+        if canonical_content_kind(item) != "text":
             return None
         text = item.text.strip()
         if text in {"刷新提示词", "重新加载提示词"}:

@@ -8,6 +8,7 @@ import json
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, Literal
 
 import httpx
 
@@ -118,22 +119,23 @@ class FeishuConnector(WebhookConnector):
         if payload.get("type") == "url_verification":
             return ()
 
-        header = payload.get("header") if isinstance(payload.get("header"), Mapping) else {}
+        raw_header = payload.get("header")
+        header: Mapping[str, Any] = raw_header if isinstance(raw_header, Mapping) else {}
         event_type = str(header.get("event_type") or "")
         if event_type and event_type != "im.message.receive_v1":
             return ()
-        event = payload.get("event") if isinstance(payload.get("event"), Mapping) else payload
-        msg = event.get("message") if isinstance(event.get("message"), Mapping) else event
+        raw_event = payload.get("event")
+        event: Mapping[str, Any] = raw_event if isinstance(raw_event, Mapping) else payload
+        raw_msg_obj = event.get("message")
+        msg = raw_msg_obj if isinstance(raw_msg_obj, Mapping) else event
         if not isinstance(msg, Mapping):
             raise TypeError("feishu payload missing message object")
 
         conversation_id = str(msg.get("chat_id") or "").strip()
-        sender_obj = event.get("sender") if isinstance(event.get("sender"), Mapping) else {}
-        sender_ids = (
-            sender_obj.get("sender_id")
-            if isinstance(sender_obj.get("sender_id"), Mapping)
-            else {}
-        )
+        raw_sender = event.get("sender")
+        sender_obj: Mapping[str, Any] = raw_sender if isinstance(raw_sender, Mapping) else {}
+        raw_sender_ids = sender_obj.get("sender_id")
+        sender_ids: Mapping[str, Any] = raw_sender_ids if isinstance(raw_sender_ids, Mapping) else {}
         sender_id = str(
             sender_ids.get("open_id")
             or sender_ids.get("user_id")
@@ -167,7 +169,6 @@ class FeishuConnector(WebhookConnector):
             parsed_content = dict(raw_content)
 
         msg_type = str(msg.get("message_type") or "text").strip().casefold()
-        original_type = 1
         content_kind = "text"
         text = ""
         if msg_type == "text":
@@ -175,7 +176,6 @@ class FeishuConnector(WebhookConnector):
         elif msg_type == "post":
             text = _feishu_post_to_text(parsed_content)
         elif msg_type == "image":
-            original_type = 3
             content_kind = "image"
             image_key = str(parsed_content.get("image_key") or "").strip()
             msg_id = str(msg.get("message_id") or "").strip()
@@ -191,7 +191,6 @@ class FeishuConnector(WebhookConnector):
                 ensure_ascii=False,
             )
         elif msg_type == "audio":
-            original_type = 34
             content_kind = "voice"
             text = json.dumps({"kind": "voice_message"}, ensure_ascii=False)
         else:
@@ -199,12 +198,10 @@ class FeishuConnector(WebhookConnector):
                 {"kind": "app_message", "text": json.dumps(parsed_content, ensure_ascii=False)[:4096]},
                 ensure_ascii=False,
             )
-            original_type = 49
-            content_kind = msg_type
+            content_kind = msg_type or "app"
 
         parent_id = str(msg.get("parent_id") or "").strip()
-        if parent_id and original_type == 1:
-            original_type = 49
+        if parent_id and content_kind == "text":
             content_kind = "quote"
             text = json.dumps(
                 {
@@ -240,7 +237,6 @@ class FeishuConnector(WebhookConnector):
                 raw_message_json=json.dumps(
                     dict(msg), ensure_ascii=False, sort_keys=True, separators=(",", ":")
                 ),
-                original_message_type=original_type,
                 source_id=self.source_id,
                 channel=self.channel,
                 content_kind=content_kind,
@@ -274,9 +270,9 @@ class FeishuConnector(WebhookConnector):
         *,
         msg_type: str,
         content_obj: dict[str, object],
-    ) -> tuple[str, str]:
+    ) -> tuple[Literal["rejected", "queued", "unknown"], str]:
         content_str = json.dumps(content_obj, ensure_ascii=False)
-        body = {
+        body: dict[str, object] = {
             "receive_id": conversation_id,
             "msg_type": msg_type,
             "content": content_str,

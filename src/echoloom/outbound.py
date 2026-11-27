@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import json
 import logging
 import mimetypes
 import random
-import sqlite3
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -55,6 +53,15 @@ async def _memory_db(
     if mem is not None:
         return await run_db(fn, *args, db=mem.db, lock=mem._lock, **kwargs)
     return fn(*args, **kwargs)
+
+
+def _state_int(state: Mapping[str, object], key: str) -> int:
+    val = state.get(key, 0)
+    if isinstance(val, int) and not isinstance(val, bool):
+        return val
+    if isinstance(val, (float, str)):
+        return int(val or 0)
+    return 0
 
 
 def _segment_pause_seconds(
@@ -260,8 +267,8 @@ class OutboundService:
             return False
         state = self.delivery_state(scope)
         return (
-            int(state.get("failure_count", 0) or 0) >= self.MAX_SEND_ATTEMPTS
-            or int(state.get("send_attempt_count", 0) or 0) >= self.MAX_SEND_ATTEMPTS
+            _state_int(state, "failure_count") >= self.MAX_SEND_ATTEMPTS
+            or _state_int(state, "send_attempt_count") >= self.MAX_SEND_ATTEMPTS
             or state.get("last_send_status") in ("queued", "accepted_by_server")
         )
 
@@ -276,14 +283,14 @@ class OutboundService:
                 "status": "already_submitted",
                 "delivered": False,
                 "last_send_status": last_status,
-                "send_attempt_count": int(state.get("send_attempt_count", 0) or 0),
+                "send_attempt_count": _state_int(state, "send_attempt_count"),
                 "reason": "previous_send_was_accepted_or_queued_do_not_duplicate",
             }
         return {
             "status": "retry_limit_reached",
             "delivered": False,
-            "failure_count": int(state.get("failure_count", 0) or 0),
-            "send_attempt_count": int(state.get("send_attempt_count", 0) or 0),
+            "failure_count": _state_int(state, "failure_count"),
+            "send_attempt_count": _state_int(state, "send_attempt_count"),
             "last_reason": state.get("last_failure_reason"),
         }
 
@@ -495,7 +502,12 @@ class OutboundService:
                         dst.write(chunk)
                 send_target = staged_path
             state, reason = await asyncio.to_thread(self.send_file_path, send_target)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "event=outbound_send_file_exception scope=%s error_type=%s",
+                scope[:12],
+                type(exc).__name__,
+            )
             state = "unknown"
             reason = "hook_transport_exception_delivery_may_have_occurred"
         finally:
@@ -673,7 +685,11 @@ class OutboundService:
             )
             state = result.status
             reason = getattr(result, "reason", None)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "event=outbound_send_text_exception error_type=%s",
+                type(exc).__name__,
+            )
             state = "unknown"
             reason = "sender_exception_delivery_may_have_occurred"
         await _store_db(self, self.update_operation_state, receipt, state)
@@ -736,7 +752,12 @@ class OutboundService:
             state, reason = await asyncio.to_thread(
                 self.gateway.send_quote, self.room, reply_text, context,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "event=outbound_send_quote_exception receipt=%s error_type=%s",
+                receipt[:12],
+                type(exc).__name__,
+            )
             state = "unknown"
             reason = "sender_exception_delivery_may_have_occurred"
         await _store_db(self, self.update_operation_state, receipt, state)
@@ -781,7 +802,12 @@ class OutboundService:
             return {"status": "already_attempted_or_no_route", "delivered": False}
         try:
             state, reason = await asyncio.to_thread(self.send_image_path, path)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "event=outbound_send_file_exception scope=%s error_type=%s",
+                scope[:12],
+                type(exc).__name__,
+            )
             state = "unknown"
             reason = "hook_transport_exception_delivery_may_have_occurred"
         if record_delivery:
@@ -830,7 +856,12 @@ class OutboundService:
             return {"status": "already_attempted_or_no_route"}
         try:
             state, reason = await asyncio.to_thread(self.send_image_path, path)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "event=outbound_send_image_exception receipt=%s error_type=%s",
+                receipt[:12],
+                type(exc).__name__,
+            )
             state = "unknown"
             reason = "hook_transport_exception_delivery_may_have_occurred"
         await _store_db(self, self.record_send_result, operation_id.get(), state, reason)
@@ -891,8 +922,8 @@ class OutboundService:
         def _prepare_attempt(*, allow_freshness: bool) -> tuple[str, int, int]:
             with lock_ctx:
                 delivery = self.delivery_state(scope)
-                failures_local = int(delivery.get("failure_count", 0) or 0)
-                send_attempts = int(delivery.get("send_attempt_count", 0) or 0)
+                failures_local = _state_int(delivery, "failure_count")
+                send_attempts = _state_int(delivery, "send_attempt_count")
                 last_status = delivery.get("last_failure_status")
                 last_reason = delivery.get("last_failure_reason")
                 if delivery.get("last_send_status") in ("queued", "accepted_by_server"):
@@ -983,7 +1014,7 @@ class OutboundService:
             if store is not None:
                 if not freshness_off_thread:
                     pre = await _store_db(self, self.delivery_state, scope)
-                    if int(pre.get("send_attempt_count", 0) or 0) == 0 and not pre.get(
+                    if _state_int(pre, "send_attempt_count") == 0 and not pre.get(
                         "side_effect_started"
                     ):
                         decision = check_outbound_freshness()
@@ -1057,6 +1088,8 @@ class OutboundService:
                 if action == "return":
                     return out_state
 
+            if retry_reply_fn is None or context is None:
+                return state
             notice = (
                 f"上一条发送结果：{state}；原因：{reason or '未知'}；"
                 f"失败 {failures}/4，尚可重试 {self.MAX_SEND_ATTEMPTS - failures} 次。"

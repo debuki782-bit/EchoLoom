@@ -479,10 +479,10 @@ class JevStrategyTurnHook:
             )
             if jev_labels:
                 by_index = {
-                    int(label["index"]): label
+                    idx_val: label
                     for label in jev_labels
-                    if isinstance(label.get("index"), int)
-                    and not isinstance(label.get("index"), bool)
+                    if isinstance((idx_val := label.get("index")), int)
+                    and not isinstance(idx_val, bool)
                 }
                 updated = replace(
                     state.window,

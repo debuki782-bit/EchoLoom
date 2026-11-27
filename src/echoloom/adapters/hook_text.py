@@ -8,9 +8,9 @@ from collections.abc import Callable
 
 import httpx
 
+from ..connectors.base import SendResult
 from ..contacts import is_contact_id
 from ..models import ConversationKey, ReplyDraft
-from ..connectors.base import SendResult
 
 logger = logging.getLogger(__name__)
 

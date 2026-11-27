@@ -45,7 +45,8 @@ class _ScopeFieldVar[T]:
 
     def set(self, value: T) -> Token[TurnScopeState | None]:
         state = _turn_scope.get() or _DEFAULT_SCOPE
-        return _turn_scope.set(replace(state, **{self._field_name: value}))
+        updates: dict[str, Any] = {self._field_name: value}
+        return _turn_scope.set(replace(state, **updates))
 
     def reset(self, token: Token[TurnScopeState | None]) -> None:
         _turn_scope.reset(token)

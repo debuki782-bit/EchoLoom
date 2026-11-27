@@ -184,7 +184,11 @@ class SessionMaintenanceTrigger:
                     job.job_id, datetime.now(UTC) + timedelta(seconds=30), "provider_unavailable",
                 )
                 continue
-            task = asyncio.create_task(self.session_maintenance())
+            async def _run_maintenance() -> int:
+                assert self.session_maintenance is not None
+                return await self.session_maintenance()
+
+            task: asyncio.Task[int] = asyncio.create_task(_run_maintenance())
             self._maintenance_task = task
             try:
                 summarized = await task
@@ -209,7 +213,8 @@ class SessionMaintenanceTrigger:
                         replace_existing=True,
                     )
             except asyncio.CancelledError:
-                if asyncio.current_task() and asyncio.current_task().cancelling():
+                cur_task = asyncio.current_task()
+                if cur_task is not None and cur_task.cancelling():
                     raise
                 logger.info("event=session_maintenance_interrupted reason=new_inbound")
             except ModelProviderUnavailable:
@@ -299,7 +304,12 @@ class IdleEventTrigger:
             if scheduler.next_idle_job(self.account) is None:
                 activity = scheduler.account_activity_state(self.account)
                 if activity and activity.get("last_inbound_at"):
-                    consecutive = int(activity.get("consecutive_idle_events") or 0)
+                    raw_consecutive = activity.get("consecutive_idle_events")
+                    consecutive = (
+                        raw_consecutive
+                        if isinstance(raw_consecutive, int) and not isinstance(raw_consecutive, bool)
+                        else 0
+                    )
                     anchor = datetime.fromisoformat(str(activity["last_inbound_at"]))
                     if consecutive > 0:
                         recent_runs = scheduler.recent_idle_event_times(
@@ -350,16 +360,23 @@ class IdleEventTrigger:
             logger.info(
                 "event=idle_event_started event_number=%s model=%s", event_number, model_id,
             )
-            task = asyncio.create_task(
-                self.idle_event_handler(event_id, event_number, model_id),
-            )
+            async def _run_idle(
+                _event_id=event_id,
+                _event_number=event_number,
+                _model_id=model_id,
+            ) -> None:
+                assert self.idle_event_handler is not None
+                await self.idle_event_handler(_event_id, _event_number, _model_id)
+
+            task: asyncio.Task[None] = asyncio.create_task(_run_idle())
             self._idle_task = task
             fallback_outcome = "timeout"
             fallback_summary = "空闲任务被中断或未能写入活动摘要；已自动记录并停止。"
             try:
                 await asyncio.wait_for(task, timeout=30 * 60)
             except asyncio.CancelledError:
-                if asyncio.current_task() and asyncio.current_task().cancelling():
+                cur_task = asyncio.current_task()
+                if cur_task is not None and cur_task.cancelling():
                     raise
                 fallback_outcome = "interrupted"
                 fallback_summary = "收到新消息，空闲活动已暂停让位。"
@@ -403,7 +420,12 @@ class IdleEventTrigger:
                 current.get("last_inbound_at")
                 and datetime.fromisoformat(str(current["last_inbound_at"])) <= started_at
             ):
-                consecutive = int(current.get("consecutive_idle_events") or 0)
+                raw_consecutive = current.get("consecutive_idle_events")
+                consecutive = (
+                    raw_consecutive
+                    if isinstance(raw_consecutive, int) and not isinstance(raw_consecutive, bool)
+                    else 0
+                )
                 self.reschedule(
                     datetime.now(UTC)
                     + timedelta(seconds=self.next_idle_delay_seconds(consecutive))

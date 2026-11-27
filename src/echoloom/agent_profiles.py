@@ -91,7 +91,8 @@ def _usd_to_microusd(value: object, *, field: str) -> int:
         amount = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise ValueError(f"{field} must be a non-negative USD amount") from exc
-    if not amount.is_finite() or amount < 0 or amount.as_tuple().exponent < -6:
+    exp = amount.as_tuple().exponent
+    if not amount.is_finite() or amount < 0 or (isinstance(exp, int) and exp < -6):
         raise ValueError(f"{field} must be a non-negative USD amount with at most 6 decimals")
     return int(amount * 1_000_000)
 
@@ -156,6 +157,13 @@ def load_agent_profiles(path: Path = PROFILE_PATH) -> AgentProfiles:
         main = item.get("main_prompt", "main_agent")
         summary = item.get("summary_prompt", "session_summary")
         summary_system = item.get("summary_system_prompt", "session_summary_system")
+        if (
+            not isinstance(persona, str)
+            or not isinstance(main, str)
+            or not isinstance(summary, str)
+            or not isinstance(summary_system, str)
+        ):
+            raise ValueError(f"profile {profile_id}: prompt names must be strings")
         # Validate names here so a typo cannot silently fall back to another prompt.
         load_prompt(persona)
         load_prompt(main)
@@ -165,14 +173,16 @@ def load_agent_profiles(path: Path = PROFILE_PATH) -> AgentProfiles:
         if (not isinstance(toolsets, list) or any(x not in _TOOLSETS for x in toolsets)
                 or len(set(toolsets)) != len(toolsets)):
             raise ValueError(f"profile {profile_id}: invalid toolsets")
-        context_limits = {
-            "input_token_limit": item.get("input_token_limit", LUNA_INPUT_TOKENS),
-            "idle_compression_tokens": item.get("idle_compression_tokens", LUNA_IDLE_COMPRESSION_TOKENS),
-            "active_compression_tokens": item.get("active_compression_tokens", LUNA_ACTIVE_COMPRESSION_TOKENS),
-        }
-        if (any(type(n) is not int or n <= 0 for n in context_limits.values())
-                or not context_limits["idle_compression_tokens"]
-                < context_limits["active_compression_tokens"] < context_limits["input_token_limit"]):
+        idle_limit = item.get("idle_compression_tokens", LUNA_IDLE_COMPRESSION_TOKENS)
+        active_limit = item.get("active_compression_tokens", LUNA_ACTIVE_COMPRESSION_TOKENS)
+        input_limit = item.get("input_token_limit", LUNA_INPUT_TOKENS)
+        if (
+            type(idle_limit) is not int
+            or type(active_limit) is not int
+            or type(input_limit) is not int
+            or idle_limit <= 0
+            or not (idle_limit < active_limit < input_limit)
+        ):
             raise ValueError(f"profile {profile_id}: require positive idle < active < input token limits")
         raw_output_limit = item.get("output_token_limit")
         output_token_limit = (
@@ -250,7 +260,9 @@ def load_agent_profiles(path: Path = PROFILE_PATH) -> AgentProfiles:
             image_generation_budget_microusd=_usd_to_microusd(
                 item.get("image_generation_budget_usd", "1.00"),
                 field=f"{profile_id}.image_generation_budget_usd"),
-            **context_limits,
+            input_token_limit=input_limit,
+            idle_compression_tokens=idle_limit,
+            active_compression_tokens=active_limit,
             output_token_limit=output_token_limit,
             token_context_limits=raw_token_limits,
             idle_session_hours=idle_session_hours,
@@ -273,8 +285,14 @@ def load_agent_profiles(path: Path = PROFILE_PATH) -> AgentProfiles:
         account = row.get("account_id")
         conversation = row.get("conversation_id")
         profile_id = row.get("profile")
-        if not all(isinstance(value, str) and value.strip()
-                   for value in (account, conversation, profile_id)):
+        if (
+            not isinstance(account, str)
+            or not account.strip()
+            or not isinstance(conversation, str)
+            or not conversation.strip()
+            or not isinstance(profile_id, str)
+            or not profile_id.strip()
+        ):
             raise ValueError("each binding needs account_id, conversation_id and profile")
         if profile_id not in profiles:
             raise ValueError(f"binding references unknown profile {profile_id!r}")

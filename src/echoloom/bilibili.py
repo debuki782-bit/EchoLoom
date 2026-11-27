@@ -214,7 +214,8 @@ class BilibiliReader:
 
     @staticmethod
     def _comments_result(data, url, limit, sort):
-        comments, seen = [], set()
+        comments: list[dict[str, object]] = []
+        seen: set[str] = set()
         top = data.get("top") or {}
         top = top if isinstance(top, dict) else {}
         pinned = [row for key in ("upper", "admin", "vote") if isinstance(row := top.get(key), dict)]
@@ -278,7 +279,7 @@ class BilibiliReader:
                 f"时长：{data.get('duration', 0)} 秒", f"简介：{data.get('desc') or '无'}"]
         if selected:
             text.append(f"当前分P：{part}，{selected.get('part', '')}")
-        subtitles = []
+        subtitles: list[dict[str, object]] = []
         # Public subtitles are optional. Their absence must not hide metadata.
         if data.get("aid") and cid:
             try:
@@ -290,7 +291,8 @@ class BilibiliReader:
         captions = ""
         if subtitles:
             subtitle = next((s for s in subtitles if str(s.get("lan", "")).startswith("zh")), subtitles[0])
-            link = urljoin("https://www.bilibili.com/", subtitle.get("subtitle_url", ""))
+            raw_link = subtitle.get("subtitle_url", "")
+            link = urljoin("https://www.bilibili.com/", raw_link if isinstance(raw_link, str) else "")
             parsed = urlsplit(link)
             if (parsed.scheme == "https" and parsed.hostname and parsed.hostname.endswith(".hdslb.com")
                     and not parsed.username and not parsed.password and parsed.port in (None, 443)):

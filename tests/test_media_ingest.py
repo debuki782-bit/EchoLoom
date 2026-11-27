@@ -119,6 +119,7 @@ def test_image_fetch_failure_is_attached_to_event_without_fallback_thumbnail(tmp
 def test_emoji_cdn_url_is_saved_as_gif_for_on_demand_vision(tmp_path: Path):
     import hashlib
     import io
+
     from PIL import Image
     buffer = io.BytesIO()
     Image.new('RGB', (2, 2), 'red').save(buffer, format='GIF')

@@ -221,6 +221,7 @@ def test_text_description_uses_same_upgrade_path_before_vision_call(tmp_path, wx
 
 def test_read_wechat_image_uses_gemini_4_hydrogen_and_settles_usage(tmp_path, wxgf):
     from types import SimpleNamespace
+
     from echoloom.runtime_scope import model_usage_scope
     from echoloom.storage import Repository
     from echoloom.usage import UsageLedger

@@ -174,6 +174,11 @@ def resolve_route_path(workspace: Path | None = None) -> Path:
     return base / "data" / "live-route.json"
 
 
+def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:
+    val = raw.get(key)
+    return val if isinstance(val, dict) else {}
+
+
 def load_local_runtime_config(workspace: Path | None = None) -> LocalRuntimeConfig:
     """Load centralized `.local/runtime.toml` (returns safe OSS defaults when disabled or absent)."""
     if not _USE_LOCAL_OVERRIDES:
@@ -183,12 +188,12 @@ def load_local_runtime_config(workspace: Path | None = None) -> LocalRuntimeConf
     if not raw:
         return LocalRuntimeConfig()
 
-    srv = raw.get("server") if isinstance(raw.get("server"), dict) else {}
-    ident = raw.get("identity") if isinstance(raw.get("identity"), dict) else {}
-    loc = raw.get("location") if isinstance(raw.get("location"), dict) else {}
-    ctx = raw.get("context") if isinstance(raw.get("context"), dict) else {}
-    sec = raw.get("security") if isinstance(raw.get("security"), dict) else {}
-    hook = raw.get("wechat_hook") if isinstance(raw.get("wechat_hook"), dict) else {}
+    srv = _table(raw, "server")
+    ident = _table(raw, "identity")
+    loc = _table(raw, "location")
+    ctx = _table(raw, "context")
+    sec = _table(raw, "security")
+    hook = _table(raw, "wechat_hook")
 
     def _port(raw_val: object, default: int) -> int:
         if isinstance(raw_val, int) and not isinstance(raw_val, bool) and 1 <= raw_val <= 65535:

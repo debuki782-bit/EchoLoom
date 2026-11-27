@@ -35,7 +35,7 @@ def wxgf_image(data: bytes, *, max_pixels: int = 40_000_000) -> tuple[bytes, str
         raise ValueError('wxgf_animation_requires_multitrack_decoder')
     try:
         import av
-        with av.open(io.BytesIO(payload), format='hevc') as container:
+        with av.open(io.BytesIO(payload), format='hevc', mode='r') as container:
             frame = next(container.decode(video=0))
             if frame.width * frame.height > max_pixels:
                 raise ValueError('wxgf_dimensions_exceed_limit')

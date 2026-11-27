@@ -9,7 +9,6 @@ $root = Split-Path -Parent $PSScriptRoot
 $python = $null
 foreach ($candidate in @(
     $env:ECHOLOOM_PYTHON,
-    (Join-Path $root '.venv-openai\Scripts\python.exe'),
     (Join-Path $root '.venv\Scripts\python.exe')
 )) {
     if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
@@ -35,7 +34,7 @@ Write-Host ("[{0}] 开始执行服务启动与健康检查（日志：{1}）" -f
 $hookPluginScript = Join-Path $PSScriptRoot 'hooks\wechat-4.1.10.27.ps1'
 
 if (-not $python -or -not (Test-Path -LiteralPath $python -PathType Leaf)) {
-    throw "未找到可用的 Python 解释器（请创建 .venv/.venv-openai 或设置 ECHOLOOM_PYTHON）。"
+    throw "未找到可用的 Python 解释器（请创建 .venv 或设置 ECHOLOOM_PYTHON）。"
 }
 if (-not (Test-Path -LiteralPath $dashboardScript -PathType Leaf)) {
     throw "管理页启动脚本不存在：$dashboardScript"

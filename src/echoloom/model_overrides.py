@@ -11,11 +11,11 @@ from .model_catalog import load_model_catalog
 
 MODEL_LABELS = load_model_catalog().labels_map()
 _MODEL_COMMANDS = (
-    ("gpt-6-luna", re.compile(r"^(?:切换|换|改用|使用)(?:到|成|为)?\s*(?:OpenAI\s*)?(?:GPT[- ]?6[- ]?)?Luna[。！!]*$", re.I)),
-    ("gemini-4-argon", re.compile(r"^(?:(?:临时)?(?:切换|换|使用|改用)(?:到|成|为)?|把模型(?:切换|换)(?:为|成))\s*(?:gemini\s*)?4\s*argon(?:\s*一小时)?[。！!]*$", re.I)),
+    ("gpt-6-luna", re.compile(r"^(?:切换|换|改用|使用)(?:到|成|为)?\s*(?:OpenAI\s*)?(?:GPT[- ]?6[- ]?)?Luna[。！!]*$", re.IGNORECASE)),
+    ("gemini-4-argon", re.compile(r"^(?:(?:临时)?(?:切换|换|使用|改用)(?:到|成|为)?|把模型(?:切换|换)(?:为|成))\s*(?:gemini\s*)?4\s*argon(?:\s*一小时)?[。！!]*$", re.IGNORECASE)),
     ("gemini-4-hydrogen", re.compile(r"^(?:(?:切换|换|使用|改用)(?:到|成|为)?|把模型(?:切换|换)(?:为|成))\s*(?:gemini\s*)?4\s*hydrogen[。！!]*$", re.IGNORECASE)),
-    ("gemini-3.8-flash", re.compile(r"^(?:(?:切换|换|使用|改用)(?:到|成|为)?|把模型(?:切换|换)(?:为|成))\s*(?:gemini\s*)?3[.]?8\s*flash[。！!]*$", re.I)),
-    ("gemini-3.5-flash-lite", re.compile(r"^(?:(?:切换|换|使用|改用)(?:到|成|为)?|把模型(?:切换|换)(?:为|成))\s*(?:gemini\s*)?3[.]?5\s*flash\s*lite[。！!]*$", re.I)),
+    ("gemini-3.8-flash", re.compile(r"^(?:(?:切换|换|使用|改用)(?:到|成|为)?|把模型(?:切换|换)(?:为|成))\s*(?:gemini\s*)?3[.]?8\s*flash[。！!]*$", re.IGNORECASE)),
+    ("gemini-3.5-flash-lite", re.compile(r"^(?:(?:切换|换|使用|改用)(?:到|成|为)?|把模型(?:切换|换)(?:为|成))\s*(?:gemini\s*)?3[.]?5\s*flash\s*lite[。！!]*$", re.IGNORECASE)),
 )
 
 

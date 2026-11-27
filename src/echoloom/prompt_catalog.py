@@ -78,7 +78,8 @@ def refresh_prompts() -> tuple[bool, str]:
     """Atomically replace prompt memory only after every file parses successfully."""
     try:
         prompts, runtime, tools = _read_prompt_snapshot()
-    except Exception as exc:  # preserve last known-good snapshot on every read/parse error
+    except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
+        # Preserve the last known-good snapshot on every read/parse failure.
         return False, type(exc).__name__
     global _RUNTIME_CACHE, _TOOL_CACHE
     with _LOCK:

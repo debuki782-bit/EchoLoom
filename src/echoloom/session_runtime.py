@@ -3,13 +3,12 @@
 import asyncio
 import hashlib
 import inspect
-import json
 import logging
 import sqlite3
 import time
 from collections.abc import Callable, Sequence
-from contextvars import ContextVar
 from pathlib import Path
+from typing import Any
 
 from . import runtime_contract as types
 from .agent_profiles import LUNA_ACTIVE_COMPRESSION_TOKENS, LUNA_IDLE_COMPRESSION_TOKENS
@@ -19,19 +18,21 @@ from .cross_chat_dedupe import CrossChatDedupeStore
 from .episode_memory import EpisodeMemory, recall_turn
 from .jev_strategy import JevStrategyClassifier
 from .ports import Clock
-from .prompt_catalog import fill_runtime, load_prompt, runtime_templates
-from .runtime_contract import AgentFramework, AgentTool, ModelProviderUnavailable
-from .runtime_contract import RunOptions as RunConfig
-from .runtime_scope import model_usage_scope
+from .prompt_catalog import load_prompt
 from .runtime_context_hook import (
     _active_session_routes,
     active_turn_scope,
-    append_runtime_context as _append_runtime_context,
     cross_chat_prompt_scope,
     current_runtime_prompt_state,
     runtime_prompt_scope,
     set_cross_chat_context,
 )
+from .runtime_context_hook import (
+    append_runtime_context as _append_runtime_context,
+)
+from .runtime_contract import AgentFramework, AgentTool, ModelProviderUnavailable
+from .runtime_contract import RunOptions as RunConfig
+from .runtime_scope import model_usage_scope
 from .session_rollover import (
     HISTORY_END as _HISTORY_END,
 )
@@ -157,18 +158,21 @@ class ScopedAgentRuntime:
             or idle_effective_message_threshold < 1
         ):
             raise ValueError("session window limits must be positive")
+        resolved_framework: AgentFramework
         if framework is None:
             from .frameworks.adk import AdkFramework
 
-            framework = AdkFramework(
+            resolved_framework = AdkFramework(
                 project_compaction=True,
                 hydrate_first_session=True,
             )
-        self.framework = framework
-        self.model = model if model is not None else framework.default_model()
+        else:
+            resolved_framework = framework
+        self.framework: AgentFramework = resolved_framework
+        self.model = model if model is not None else resolved_framework.default_model()
         resolved_summary_model = summary_model if summary_model is not None else self.model
         resolved_summary_framework = (
-            summary_framework if summary_framework is not None else framework
+            summary_framework if summary_framework is not None else resolved_framework
         )
         self.profile_id = profile_id
         self.persona_prompt = persona_prompt
@@ -195,7 +199,7 @@ class ScopedAgentRuntime:
         else:
             resolved_token_limits = bool(token_context_limits)
 
-        self.sessions: object
+        self.sessions: Any
         routing_db: sqlite3.Connection | None
         if database_path is None:
             self.sessions = self.framework.sessions()
@@ -268,7 +272,7 @@ class ScopedAgentRuntime:
             )
         )
         self._runner_threshold = self.rollover.runner_threshold
-        self._restricted_runners: dict[frozenset[str], object] = {}
+        self._restricted_runners: dict[frozenset[str], Any] = {}
         self.runner = self._build_runner(self._agent_tools)
 
     # Compatibility pass-through properties keeping rollover/hook config in sync with mutations.
@@ -514,9 +518,10 @@ class ScopedAgentRuntime:
                     return pre_batch_gap
             return age
 
+        event_book_fn = self.event_book_context
         event_provider = (
-            (lambda: self.event_book_context(window.account_id))
-            if self.event_book_context is not None
+            (lambda: event_book_fn(window.account_id))
+            if event_book_fn is not None
             else None
         )
         gap_provider = (

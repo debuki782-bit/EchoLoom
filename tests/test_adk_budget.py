@@ -28,9 +28,13 @@ from echoloom.models import InboundEvent
 from echoloom.providers import GeminiProvider, ModelCallIndeterminate
 from echoloom.runtime_contract import (
     AgentTool,
-    Content as RuntimeContent,
-    Part as RuntimePart,
     RunOptions,
+)
+from echoloom.runtime_contract import (
+    Content as RuntimeContent,
+)
+from echoloom.runtime_contract import (
+    Part as RuntimePart,
 )
 from echoloom.storage import Repository
 from echoloom.usage import UsageLedger
@@ -614,8 +618,8 @@ def test_adk_count_tokens_connect_error_raises_provider_unavailable_without_rese
             fake = PricedFake()
             fake.model = "gemini-3.5-flash-lite"
 
-            async def failing_counter(**_kwargs):
-                raise err
+            async def failing_counter(*, _err=err, **_kwargs):
+                raise _err
 
             model = BudgetedAdkModel(
                 fake,
@@ -626,12 +630,11 @@ def test_adk_count_tokens_connect_error_raises_provider_unavailable_without_rese
                 token_counter=failing_counter,
             )
             try:
-                with model_usage_scope("bot", "room"):
-                    with pytest.raises(ModelProviderUnavailable):
-                        async for _ in model.generate_content_async(
-                            LlmRequest(contents=[types.Content(role="user", parts=[types.Part.from_text(text="hi")])])
-                        ):
-                            pass
+                with model_usage_scope("bot", "room"), pytest.raises(ModelProviderUnavailable):
+                    async for _ in model.generate_content_async(
+                        LlmRequest(contents=[types.Content(role="user", parts=[types.Part.from_text(text="hi")])])
+                    ):
+                        pass
                 assert repo.conn.execute("SELECT count(*) FROM usage_reservations").fetchone()[0] == 0
                 assert usage.committed_microusd("bot", "2026-10") == 0
                 assert fake.requests == []
@@ -660,12 +663,11 @@ def test_adk_count_tokens_connect_error_raises_provider_unavailable_without_rese
                     budget_microusd=100_000,
                     token_counter=fn,
                 )
-                with model_usage_scope("bot", "room"):
-                    with pytest.raises(expected):
-                        async for _ in model.generate_content_async(
-                            LlmRequest(contents=[types.Content(role="user", parts=[types.Part.from_text(text="hi")])])
-                        ):
-                            pass
+                with model_usage_scope("bot", "room"), pytest.raises(expected):
+                    async for _ in model.generate_content_async(
+                        LlmRequest(contents=[types.Content(role="user", parts=[types.Part.from_text(text="hi")])])
+                    ):
+                        pass
                 assert repo.conn.execute("SELECT count(*) FROM usage_reservations").fetchone()[0] == 0
         finally:
             repo.close()
@@ -731,12 +733,11 @@ def test_adk_generate_content_pre_vs_post_dispatch_errors(
             fake, usage, Clock(), model_id=fake.model, budget_microusd=100_000,
         )
         try:
-            with model_usage_scope("bot", "room"):
-                with pytest.raises(expected_exc):
-                    async for _ in model.generate_content_async(
-                        LlmRequest(contents=[types.Content(role="user", parts=[types.Part.from_text(text="hi")])])
-                    ):
-                        pass
+            with model_usage_scope("bot", "room"), pytest.raises(expected_exc):
+                async for _ in model.generate_content_async(
+                    LlmRequest(contents=[types.Content(role="user", parts=[types.Part.from_text(text="hi")])])
+                ):
+                    pass
             state = repo.conn.execute("SELECT state FROM usage_reservations").fetchone()[0]
             assert state == expected_state
             if expected_state == "released":
@@ -912,12 +913,11 @@ def test_adk_genai_api_error_status_releases_or_retains_reservation(
             fake, usage, Clock(), model_id=fake.model, budget_microusd=500_000,
         )
         try:
-            with model_usage_scope("bot", "room"):
-                with pytest.raises(expected_exc):
-                    async for _ in model.generate_content_async(
-                        LlmRequest(contents=[types.Content(role="user", parts=[types.Part.from_text(text="hi")])])
-                    ):
-                        pass
+            with model_usage_scope("bot", "room"), pytest.raises(expected_exc):
+                async for _ in model.generate_content_async(
+                    LlmRequest(contents=[types.Content(role="user", parts=[types.Part.from_text(text="hi")])])
+                ):
+                    pass
             state = repo.conn.execute("SELECT state FROM usage_reservations").fetchone()[0]
             assert state == expected_state
             if expected_state == "released":
@@ -934,6 +934,7 @@ def test_gemini_mldev_count_tokens_uses_official_generate_content_request_and_ca
     tmp_path: Path,
 ) -> None:
     import json
+
     from google import genai
 
     async def scenario() -> None:

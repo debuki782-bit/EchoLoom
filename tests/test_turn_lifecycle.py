@@ -25,7 +25,6 @@ from echoloom.memory_store import MemoryStore
 from echoloom.mock import SystemClock
 from echoloom.models import ConversationKey
 from echoloom.pilot import Pilot
-from echoloom.runtime_contract import ToolContext
 from echoloom.session_runtime import ScopedAgentRuntime
 from echoloom.tool_timing import turn_deadline_monotonic
 from echoloom.wechat_tools import (
@@ -208,7 +207,6 @@ def test_sdk_cross_session_replay_keeps_partial_updates_and_sends_once(tmp_path)
 
 
 def test_mutation_receipt_failure_rolls_back_then_retry_writes_once(tmp_path):
-    from google.adk.tools.tool_context import ToolContext as AdkToolContext
     from echoloom.frameworks.adk import to_adk
 
     async def scenario():

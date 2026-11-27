@@ -10,11 +10,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
-from echoloom.runtime_contract import (
-    BudgetExhausted as AdkBudgetExhausted,
-    ModelCallsLimitExceeded as LlmCallsLimitExceededError,
-    ModelProviderUnavailable,
-)
 
 from echoloom.adk_runner import ScopedAdkRunner
 from echoloom.contacts import ContactIdentity
@@ -26,6 +21,15 @@ from echoloom.memory_store import MemoryStore
 from echoloom.models import ConversationKey
 from echoloom.pilot import Pilot, _current_message_id
 from echoloom.rich_message import normalize_message
+from echoloom.runtime_contract import (
+    BudgetExhausted as AdkBudgetExhausted,
+)
+from echoloom.runtime_contract import (
+    ModelCallsLimitExceeded as LlmCallsLimitExceededError,
+)
+from echoloom.runtime_contract import (
+    ModelProviderUnavailable,
+)
 from echoloom.time_scheduler import TimeScheduler
 from echoloom.wechat_tools import quote_context
 
@@ -1063,11 +1067,13 @@ def test_session_maintenance_worker_defers_without_spinning_on_type_error_and_pr
             calls = 0
             called = asyncio.Event()
 
-            async def failing_maintenance() -> int:
+            async def failing_maintenance(
+                *, _called=called, _exc_factory=exc_factory,
+            ) -> int:
                 nonlocal calls
                 calls += 1
-                called.set()
-                raise exc_factory()
+                _called.set()
+                raise _exc_factory()
 
             pilot = Pilot(
                 sub / "pilot.sqlite3",
@@ -1502,6 +1508,7 @@ def test_session_maintenance_trigger_defers_30_minutes_on_noop_and_prunes(tmp_pa
 
 def test_attempts_table_never_blocks_pilot_inbox_batch_replay_and_outbound_dedups(tmp_path: Path):
     import hashlib
+
     from echoloom.mock import SystemClock
     from echoloom.outbound import OutboundService
     from echoloom.wechat_gateway import SendResult

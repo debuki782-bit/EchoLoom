@@ -19,6 +19,11 @@ from .context_builder import ContextBuilder, ContextSpec
 from .conversation_scheduler import ConversationScheduler
 from .db_async import register_thread_safe_db
 from .dispatcher import Dispatcher, current_message_id
+from .dispatcher_support import (
+    DispatcherOptions,
+    DispatcherPorts,
+    DispatcherRuntimeHooks,
+)
 from .ingress import Ingress, create_ingress_app, read_attempt_counts, sha
 from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
 from .memory_store import MemoryStore
@@ -194,32 +199,49 @@ class Pilot:
             queue_depth_provider=self.queue.qsize,
         )
         self.dispatcher = Dispatcher(
-            self.db, self.scheduler, account, room, reply, send,
-            outbound=outbound, limit=limit, resolve_contact=resolve_contact,
-            memory_store=memory_store, image_ingestor=image_ingestor,
-            voice_ingestor=voice_ingestor, file_ingestor=file_ingestor,
-            daily_environment=daily_environment,
-            record_activity=record_activity, delivery_state=delivery_state,
-            record_send_result=record_send_result,
-            pending_delivery_notices=pending_delivery_notices,
-            acknowledge_delivery_notices=acknowledge_delivery_notices,
-            record_delivery_notice=record_delivery_notice,
-            context_assembler=context_assembler,
-            message_ingestor=message_ingestor,
-            context_builder=context_builder,
-            max_user_bytes=max_user_bytes,
-            max_user_bytes_for_conversation=max_user_bytes_for_conversation,
-            special_command_handler=special_command_handler,
-            archive_envelope=archive_envelope, provider_check=provider_check,
-            provider_probe_base_seconds=provider_probe_base_seconds,
-            provider_probe_max_seconds=provider_probe_max_seconds,
-            on_model_indeterminate=on_model_indeterminate,
-            indeterminate_cooldown_base_seconds=indeterminate_cooldown_base_seconds,
-            indeterminate_cooldown_max_seconds=indeterminate_cooldown_max_seconds,
-            in_scope=self.ingress.in_scope,
-            is_paused=lambda: self.ingress.paused,
-            is_wechat_ready=lambda: self.triggers.login_watcher.wechat_ready,
-            drain_queue=self._drain_queue,
+            self.db,
+            self.scheduler,
+            account,
+            room,
+            reply,
+            ports=DispatcherPorts(
+                send=send,
+                outbound=outbound,
+                resolve_contact=resolve_contact,
+                memory_store=memory_store,
+                image_ingestor=image_ingestor,
+                voice_ingestor=voice_ingestor,
+                file_ingestor=file_ingestor,
+                daily_environment=daily_environment,
+                record_activity=record_activity,
+                delivery_state=delivery_state,
+                record_send_result=record_send_result,
+                pending_delivery_notices=pending_delivery_notices,
+                acknowledge_delivery_notices=acknowledge_delivery_notices,
+                record_delivery_notice=record_delivery_notice,
+                context_assembler=context_assembler,
+                message_ingestor=message_ingestor,
+                context_builder=context_builder,
+                special_command_handler=special_command_handler,
+                archive_envelope=archive_envelope,
+            ),
+            hooks=DispatcherRuntimeHooks(
+                provider_check=provider_check,
+                on_model_indeterminate=on_model_indeterminate,
+                in_scope=self.ingress.in_scope,
+                is_paused=lambda: self.ingress.paused,
+                is_source_ready=lambda: self.triggers.login_watcher.wechat_ready,
+                drain_queue=self._drain_queue,
+            ),
+            options=DispatcherOptions(
+                limit=limit,
+                max_user_bytes=max_user_bytes,
+                max_user_bytes_for_conversation=max_user_bytes_for_conversation,
+                provider_probe_base_seconds=provider_probe_base_seconds,
+                provider_probe_max_seconds=provider_probe_max_seconds,
+                indeterminate_cooldown_base_seconds=indeterminate_cooldown_base_seconds,
+                indeterminate_cooldown_max_seconds=indeterminate_cooldown_max_seconds,
+            ),
         )
         self.triggers = Triggers(
             account, self.dispatcher,

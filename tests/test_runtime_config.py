@@ -115,11 +115,15 @@ def test_account_feature_budget_is_shared_between_profiles(tmp_path: Path) -> No
 
     repo = Repository(tmp_path / "usage.sqlite3")
     ledger = UsageLedger(repo, Clock())
-    common = dict(
-        account_id="bot", feature="adk_chat", model_id="gemini-3.8-flash",
-        maximum_microusd=70, budget_microusd=500,
-        account_feature_budget_microusd=100, budget_group="text_model",
-    )
+    common: dict[str, object] = {
+        "account_id": "bot",
+        "feature": "adk_chat",
+        "model_id": "gemini-3.8-flash",
+        "maximum_microusd": 70,
+        "budget_microusd": 500,
+        "account_feature_budget_microusd": 100,
+        "budget_group": "text_model",
+    }
     assert ledger.reserve(request_id="one", conversation_id="a", budget_scope_id="a",
                           **common).status == "reserved"
     assert ledger.reserve(request_id="two", conversation_id="b", budget_scope_id="b",
@@ -153,6 +157,7 @@ def test_local_agent_profiles_override_when_enabled(tmp_path: Path, monkeypatch)
 
 def test_local_prompt_dir_overrides_and_falls_back(tmp_path: Path, monkeypatch) -> None:
     import shutil
+
     from echoloom import prompt_catalog
 
     repo_prompts = Path(__file__).resolve().parents[1] / "prompts"
@@ -228,6 +233,7 @@ def test_model_catalog_loads_base_overrides_and_rate_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import shutil
+
     from echoloom import local_config, model_catalog
 
     repo_root = Path(__file__).resolve().parents[1]

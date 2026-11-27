@@ -1,7 +1,6 @@
 """Offline-testable Gemini text adapter; no client or key is created by default."""
 
 import hashlib
-from datetime import datetime
 from typing import Any
 
 import httpx
@@ -11,14 +10,11 @@ from .context import build_event_context
 from .model_catalog import load_model_catalog
 from .models import InboundEvent
 from .ports import Clock
+from .runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
 from .usage import (
     TEXT_MODEL_DAILY_BUDGET_MICROUSD,
     UsageLedger,
 )
-
-
-from .runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
-
 
 _PRE_DISPATCH_CONNECT_ERRORS = (
     httpx.ConnectError,

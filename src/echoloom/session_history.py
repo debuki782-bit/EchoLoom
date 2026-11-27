@@ -6,9 +6,10 @@ import hashlib
 import inspect
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +76,13 @@ def strip_injected_history(text: str) -> str:
     return text
 
 
-def live_session_events(events: object) -> list[object]:
+def live_session_events(events: Iterable[Any] | None) -> list[Any]:
     """Return session events that survive rewind markers without importing framework SDKs."""
     items = list(events) if events is not None else []
     if not items:
         return []
     first_idx_by_inv: dict[object, int] | None = None
-    kept: list[object] = []
+    kept: list[Any] = []
     i = len(items) - 1
     while i >= 0:
         event = items[i]

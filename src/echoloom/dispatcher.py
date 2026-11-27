@@ -14,13 +14,15 @@ from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from .contacts import ContactIdentity
 from .context import ContextWindow, fit_context_window
 from .context_assembler import AssembledBatch, MessageContextAssembler
 from .context_builder import ContextBuilder, ContextSpec
 from .conversation_scheduler import ConversationScheduler, MessageBatch
 from .db_async import is_db_thread_safe, run_db
 from .dispatcher_support import (
+    DispatcherOptions,
+    DispatcherPorts,
+    DispatcherRuntimeHooks,
     ProviderCircuitBreaker,
     account_aliases_for_context,
     allow_single_attempt,
@@ -32,18 +34,14 @@ from .dispatcher_support import (
 )
 from .freshness_policy import FreshnessDecision, evaluate_outbound_freshness
 from .ingress import sha
-from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
-from .memory_store import MemoryStore
 from .message_ingestor import MessageIngestor
-from .models import ReplyDraft
 from .outbound import OutboundService
 from .runtime_contract import BudgetExhausted as AdkBudgetExhausted
 from .runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
 from .runtime_contract import ModelCallsLimitExceeded as LlmCallsLimitExceededError
-from .temporal_context import DailyEnvironmentProvider
 from .tool_timing import turn_deadline_monotonic, turn_started_monotonic
 from .turn_scope import operation_receipt_ids, tool_turn_scope
-from .wechat_gateway import MessageEvent, SendResult, default_archive_envelope
+from .wechat_gateway import MessageEvent
 
 logger = logging.getLogger(__name__)
 
@@ -79,103 +77,63 @@ class Dispatcher:
         account: str,
         room: str,
         reply: Callable[[ContextWindow], Awaitable[str]],
-        send: Callable[[ReplyDraft], SendResult] | None = None,
         *,
-        outbound: OutboundService | None = None,
-        limit: int | None = 6,
-        resolve_contact: Callable[[str], ContactIdentity | None] | None = None,
-        memory_store: MemoryStore | None = None,
-        image_ingestor: WeChatImageIngestor | None = None,
-        voice_ingestor: WeChatVoiceIngestor | None = None,
-        file_ingestor: WeChatFileIngestor | None = None,
-        daily_environment: DailyEnvironmentProvider | None = None,
-        record_activity: Callable[[str, str], Awaitable[None]] | None = None,
-        delivery_state: Callable[[str], dict[str, object]] | None = None,
-        record_send_result: Callable[[str, str, str | None], int] | None = None,
-        pending_delivery_notices: Callable[[], list[dict[str, object]]] | None = None,
-        acknowledge_delivery_notices: Callable[[tuple[str, ...]], None] | None = None,
-        record_delivery_notice: Callable[[str, str, str | None, int], None] | None = None,
-        context_assembler: MessageContextAssembler | None = None,
-        message_ingestor: MessageIngestor | None = None,
-        context_builder: ContextBuilder | None = None,
-        max_user_bytes: int = 32_000,
-        max_user_bytes_for_conversation: Callable[[str, str], int] | None = None,
-        special_command_handler: Callable[[MessageEvent], Awaitable[str | None]] | None = None,
-        archive_envelope=default_archive_envelope,
-        provider_check: Callable[[], Awaitable[bool]] | None = None,
-        provider_probe_base_seconds: float = 5.0,
-        provider_probe_max_seconds: float = 30.0,
-        on_model_indeterminate: Callable[[], Awaitable[None] | None] | None = None,
-        indeterminate_cooldown_base_seconds: float = 30.0,
-        indeterminate_cooldown_max_seconds: float = 600.0,
-        in_scope: Callable[[MessageEvent], bool] | None = None,
-        is_paused: Callable[[], bool] | None = None,
-        is_wechat_ready: Callable[[], bool] | None = None,
-        on_budget_recovered: Callable[[MessageEvent], None] | None = None,
-        blocked_conversations_provider: Callable[[], set[tuple[str, str]]] | None = None,
-        is_followup_scheduled: Callable[[str, str], bool] | None = None,
-        get_cancelled_followup: Callable[[str, str], int | None] | None = None,
-        clear_cancelled_followup: Callable[[str, str, int], None] | None = None,
-        followup_factory: (
-            Callable[[ContextWindow, str], Callable[[str, int], Awaitable[dict[str, object]]]]
-            | None
-        ) = None,
-        scheduled_followups_count: Callable[[], int] | None = None,
-        drain_queue: Callable[[], None] | None = None,
-        worker_id: str = "default",
-        heartbeat_interval_seconds: float = 2.0,
-        process_timeout_seconds: float = PROCESS_TIMEOUT_SECONDS,
-        max_freshness_holds: int = 1,
-        account_aliases_provider: Callable[[str], Sequence[str]] | None = None,
+        ports: DispatcherPorts | None = None,
+        hooks: DispatcherRuntimeHooks | None = None,
+        options: DispatcherOptions | None = None,
     ) -> None:
+        ports = ports or DispatcherPorts()
+        hooks = hooks or DispatcherRuntimeHooks()
+        options = options or DispatcherOptions()
+
         self.db = db
         self.scheduler = scheduler
         self.account = account
         self.room = room
         self.reply = reply
-        self.send = send
-        self.outbound = outbound
-        self.limit = limit
-        self.resolve_contact = resolve_contact
-        self.memory_store = memory_store
-        self.image_ingestor = image_ingestor
-        self.voice_ingestor = voice_ingestor
-        self.file_ingestor = file_ingestor
-        self.daily_environment = daily_environment
-        self.record_activity = record_activity
-        self.delivery_state = delivery_state
-        self.record_send_result = record_send_result
-        self.pending_delivery_notices = pending_delivery_notices
-        self.acknowledge_delivery_notices = acknowledge_delivery_notices
-        self.record_delivery_notice = record_delivery_notice
-        self.context_assembler = context_assembler
-        self._message_ingestor = message_ingestor
-        self._context_builder = context_builder
-        self.max_user_bytes = max_user_bytes
-        self.max_user_bytes_for_conversation = max_user_bytes_for_conversation
+        self.send = ports.send
+        self.outbound = ports.outbound
+        self.limit = options.limit
+        self.resolve_contact = ports.resolve_contact
+        self.memory_store = ports.memory_store
+        self.image_ingestor = ports.image_ingestor
+        self.voice_ingestor = ports.voice_ingestor
+        self.file_ingestor = ports.file_ingestor
+        self.daily_environment = ports.daily_environment
+        self.record_activity = ports.record_activity
+        self.delivery_state = ports.delivery_state
+        self.record_send_result = ports.record_send_result
+        self.pending_delivery_notices = ports.pending_delivery_notices
+        self.acknowledge_delivery_notices = ports.acknowledge_delivery_notices
+        self.record_delivery_notice = ports.record_delivery_notice
+        self.context_assembler = ports.context_assembler
+        self._message_ingestor = ports.message_ingestor
+        self._context_builder = ports.context_builder
+        self.max_user_bytes = options.max_user_bytes
+        self.max_user_bytes_for_conversation = options.max_user_bytes_for_conversation
         self._default_ingestor = MessageIngestor(
-            memory_store,
-            image_ingestor=image_ingestor,
-            voice_ingestor=voice_ingestor,
-            file_ingestor=file_ingestor,
-            archive_envelope=archive_envelope,
+            ports.memory_store,
+            image_ingestor=ports.image_ingestor,
+            voice_ingestor=ports.voice_ingestor,
+            file_ingestor=ports.file_ingestor,
+            archive_envelope=ports.archive_envelope,
         )
         self._default_builder = ContextBuilder(
-            memory_store,
-            resolve_contact=resolve_contact,
-            daily_environment=daily_environment,
+            ports.memory_store,
+            resolve_contact=ports.resolve_contact,
+            daily_environment=ports.daily_environment,
         )
-        self.special_command_handler = special_command_handler
-        self.archive_envelope = archive_envelope
+        self.special_command_handler = ports.special_command_handler
+        self.archive_envelope = ports.archive_envelope
         self._indeterminate_failures = 0
         self._indeterminate_cooldown_until_monotonic = 0.0
-        self.on_model_indeterminate = on_model_indeterminate
+        self.on_model_indeterminate = hooks.on_model_indeterminate
         self._indeterminate_cooldown_base_seconds = max(
-            0.0, float(indeterminate_cooldown_base_seconds)
+            0.0, float(options.indeterminate_cooldown_base_seconds)
         )
         self._indeterminate_cooldown_max_seconds = max(
             self._indeterminate_cooldown_base_seconds,
-            float(indeterminate_cooldown_max_seconds),
+            float(options.indeterminate_cooldown_max_seconds),
         )
 
         def _on_circuit_healthy() -> None:
@@ -184,27 +142,28 @@ class Dispatcher:
             self.scheduler.wake_deferred_batches()
 
         self._circuit = ProviderCircuitBreaker(
-            provider_check=provider_check,
-            base_seconds=provider_probe_base_seconds,
-            max_seconds=provider_probe_max_seconds,
+            provider_check=hooks.provider_check,
+            base_seconds=options.provider_probe_base_seconds,
+            max_seconds=options.provider_probe_max_seconds,
             on_healthy=_on_circuit_healthy,
         )
-        self._in_scope = in_scope or (lambda item: item.account_id == self.account)
-        self._is_paused = is_paused or (lambda: False)
-        self._is_wechat_ready = is_wechat_ready or (lambda: True)
-        self.on_budget_recovered = on_budget_recovered
-        self.blocked_conversations_provider = blocked_conversations_provider
-        self.is_followup_scheduled = is_followup_scheduled
-        self.get_cancelled_followup = get_cancelled_followup
-        self.clear_cancelled_followup = clear_cancelled_followup
-        self.followup_factory = followup_factory
-        self.scheduled_followups_count = scheduled_followups_count
-        self.drain_queue = drain_queue
-        self.worker_id = worker_id
-        self.heartbeat_interval_seconds = float(heartbeat_interval_seconds)
-        self.process_timeout_seconds = float(process_timeout_seconds)
-        self.max_freshness_holds = max(0, int(max_freshness_holds))
-        self.account_aliases_provider = account_aliases_provider
+        self._in_scope = hooks.in_scope or (lambda item: item.account_id == self.account)
+        self._is_paused = hooks.is_paused or (lambda: False)
+        self._is_source_ready = hooks.is_source_ready or (lambda: True)
+        self._is_wechat_ready = self._is_source_ready
+        self.on_budget_recovered = hooks.on_budget_recovered
+        self.blocked_conversations_provider = hooks.blocked_conversations_provider
+        self.is_followup_scheduled = hooks.is_followup_scheduled
+        self.get_cancelled_followup = hooks.get_cancelled_followup
+        self.clear_cancelled_followup = hooks.clear_cancelled_followup
+        self.followup_factory = hooks.followup_factory
+        self.scheduled_followups_count = hooks.scheduled_followups_count
+        self.drain_queue = hooks.drain_queue
+        self.worker_id = options.worker_id
+        self.heartbeat_interval_seconds = float(options.heartbeat_interval_seconds)
+        self.process_timeout_seconds = float(options.process_timeout_seconds)
+        self.max_freshness_holds = max(0, int(options.max_freshness_holds))
+        self.account_aliases_provider = ports.account_aliases_provider
         self._in_flight: dict[str, object] | None = None
 
     async def _db(self, fn, *args, **kwargs):
@@ -216,8 +175,10 @@ class Dispatcher:
 
     def _batch_scope_has_side_effect(self, batch_receipt: str) -> bool:
         delivery = self.current_delivery_state(batch_receipt)
+        raw_attempts = delivery.get("send_attempt_count", 0)
+        attempts = raw_attempts if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool) else int(str(raw_attempts or 0))
         return (
-            int(delivery.get("send_attempt_count", 0) or 0) > 0
+            attempts > 0
             or delivery.get("last_send_status")
             in ("queued", "accepted_by_server", "unknown")
         )
@@ -273,11 +234,17 @@ class Dispatcher:
     def in_flight_snapshot(self, *, include_started_at: bool = False) -> dict[str, object] | None:
         if self._in_flight is None:
             return None
+        started_raw = self._in_flight["started_monotonic"]
+        started_mono = (
+            float(started_raw)
+            if isinstance(started_raw, (int, float)) and not isinstance(started_raw, bool)
+            else time.monotonic()
+        )
         snapshot: dict[str, object] = {
             "sender_sha": self._in_flight["sender_sha"],
             "message_type": self._in_flight["message_type"],
             "elapsed_seconds": round(
-                time.monotonic() - float(self._in_flight["started_monotonic"]),
+                time.monotonic() - started_mono,
                 1,
             ),
         }
@@ -291,7 +258,7 @@ class Dispatcher:
             self.scheduler.update_worker_heartbeat(
                 worker_id=self.worker_id,
                 pid=os.getpid(),
-                wechat_ready=self._is_wechat_ready(),
+                wechat_ready=self._is_source_ready(),
                 provider_ready=self._provider_ready,
                 in_flight=self.in_flight_snapshot(include_started_at=True),
                 scheduled_followups=(
@@ -1054,7 +1021,7 @@ class Dispatcher:
             await self._db(self.publish_heartbeat)
             while True:
                 try:
-                    if self._is_paused() or not self._is_wechat_ready():
+                    if self._is_paused() or not self._is_source_ready():
                         await asyncio.sleep(0.5)
                         continue
                     now_monotonic = time.monotonic()

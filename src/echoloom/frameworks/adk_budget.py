@@ -1,27 +1,28 @@
 """Per-call cost, token, and image-sub-budget boundary for ADK models."""
 
 import asyncio
+import base64
 import hashlib
 import inspect
 import json
 import logging
 from collections import OrderedDict
 from collections.abc import Callable
+from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
-import google.genai._common as genai_common
 import google.genai.models as genai_models
 import httpx
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
-from pydantic import PrivateAttr
+from pydantic import BaseModel, PrivateAttr
 
 from ..agent_profiles import (
     LUNA_ACTIVE_COMPRESSION_TOKENS,
     LUNA_IDLE_COMPRESSION_TOKENS,
-    LUNA_INPUT_TOKENS,
 )
 from ..model_catalog import load_model_catalog
 from ..ports import Clock
@@ -164,6 +165,8 @@ def _microusd_with_cached_input(
 
 from ..runtime_contract import (
     BudgetExhausted as AdkBudgetExhausted,
+)
+from ..runtime_contract import (
     ModelProviderUnavailable,
 )
 from ..runtime_scope import (  # noqa: F401 - legacy public re-exports
@@ -235,7 +238,7 @@ def _count_tokens_config(request: LlmRequest) -> types.CountTokensConfig | None:
         value is not None for value in (response_schema, response_json_schema, response_mime_type)
     )
     gen_config = (
-        types.GenerateContentConfig(
+        types.GenerationConfig(
             response_schema=response_schema,
             response_json_schema=response_json_schema,
             response_mime_type=response_mime_type,
@@ -255,6 +258,7 @@ def _count_tokens_config(request: LlmRequest) -> types.CountTokensConfig | None:
 def _request_count_cache_key(model: str, request: LlmRequest) -> str:
     """Canonical SHA-256 digest of the token-counted request payload."""
     config = getattr(request, "config", None)
+    sys_inst = getattr(config, "system_instruction", None)
     canonical = {
         "model": model,
         "contents": [
@@ -262,9 +266,9 @@ def _request_count_cache_key(model: str, request: LlmRequest) -> str:
             for content in (request.contents or [])
         ],
         "system_instruction": (
-            config.system_instruction.model_dump(mode="json", exclude_none=True)
-            if isinstance(getattr(config, "system_instruction", None), types.Content)
-            else _instruction_text(getattr(config, "system_instruction", None))
+            sys_inst.model_dump(mode="json", exclude_none=True)
+            if isinstance(sys_inst, types.Content)
+            else _instruction_text(sys_inst)
         ),
         "tools": [
             tool.model_dump(mode="json", exclude_none=True)
@@ -282,6 +286,21 @@ def _request_count_cache_key(model: str, request: LlmRequest) -> str:
         )
     encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _serialize_mldev_value(value: object) -> Any:
+    """Convert Pydantic models, bytes, and datetimes into JSON-ready mldev dicts."""
+    if isinstance(value, BaseModel):
+        return _serialize_mldev_value(value.model_dump(exclude_none=True))
+    if isinstance(value, bytes):
+        return base64.urlsafe_b64encode(value).decode("ascii")
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _serialize_mldev_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_serialize_mldev_value(item) for item in value]
+    return value
 
 
 async def _call_mldev_generate_content_count_tokens(
@@ -304,10 +323,10 @@ async def _call_mldev_generate_content_count_tokens(
             val = getattr(nested, attr, None)
             if val is not None:
                 gen_cfg_fields[attr] = val
-    gen_config = types.GenerateContentConfig(**gen_cfg_fields)
+    gen_config = types.GenerateContentConfig(**gen_cfg_fields)  # type: ignore[arg-type]
     param_model = types._GenerateContentParameters(
         model=model,
-        contents=contents,
+        contents=contents,  # type: ignore[arg-type]
         config=gen_config,
     )
     request_dict = genai_models._GenerateContentParameters_to_mldev(
@@ -319,8 +338,8 @@ async def _call_mldev_generate_content_count_tokens(
     request_dict.pop("config", None)
     if not request_dict.get("generationConfig"):
         request_dict.pop("generationConfig", None)
-    payload = genai_common.encode_unserializable_types(
-        genai_common.convert_to_dict({"generateContentRequest": {"model": model_path, **request_dict}})
+    payload = _serialize_mldev_value(
+        {"generateContentRequest": {"model": model_path, **request_dict}}
     )
     response = await api_client.async_request("post", f"{model_path}:countTokens", payload, http_options)
     response_dict = {} if not response.body else json.loads(response.body)
@@ -375,7 +394,7 @@ class BudgetedAdkModel(BaseLlm):
     _output_limit: int = PrivateAttr()
     _idle_compression_tokens: int = PrivateAttr(default=LUNA_IDLE_COMPRESSION_TOKENS)
     _active_compression_tokens: int = PrivateAttr(default=LUNA_ACTIVE_COMPRESSION_TOKENS)
-    _token_counter: object | None = PrivateAttr(default=None)
+    _token_counter: Callable[..., Any] | None = PrivateAttr(default=None)
     _token_count_cache: OrderedDict[str, int] = PrivateAttr(default_factory=OrderedDict)
     _http_timeout_ms: int = PrivateAttr(default=20_000)
     _use_streaming: bool = PrivateAttr(default=False)
@@ -590,18 +609,23 @@ class BudgetedAdkModel(BaseLlm):
             return cached
 
         count_config = _count_tokens_config(request)
-        models_obj = _resolve_real_genai_models(self._token_counter)
+        token_counter = self._token_counter
+        models_obj = _resolve_real_genai_models(token_counter)
         try:
             async with asyncio.timeout(self._http_timeout_ms / 1000):
                 if models_obj is not None:
                     if getattr(models_obj._api_client, "vertexai", False) or count_config is None:
-                        kwargs: dict[str, object] = {
-                            "model": self.model,
-                            "contents": request.contents,
-                        }
                         if count_config is not None:
-                            kwargs["config"] = count_config
-                        counted = await models_obj.count_tokens(**kwargs)
+                            counted = await models_obj.count_tokens(
+                                model=self.model,
+                                contents=request.contents,
+                                config=count_config,
+                            )
+                        else:
+                            counted = await models_obj.count_tokens(
+                                model=self.model,
+                                contents=request.contents,
+                            )
                     else:
                         counted = await _call_mldev_generate_content_count_tokens(
                             models_obj._api_client,
@@ -610,11 +634,20 @@ class BudgetedAdkModel(BaseLlm):
                             count_config=count_config,
                             http_options=types.HttpOptions(timeout=self._http_timeout_ms),
                         )
-                elif count_config is None or _counter_accepts_config(self._token_counter):
-                    kwargs = {"model": self.model, "contents": request.contents}
+                elif token_counter is None:
+                    raise ModelProviderUnavailable("ADK token counter unavailable")
+                elif count_config is None or _counter_accepts_config(token_counter):
                     if count_config is not None:
-                        kwargs["config"] = count_config
-                    counted = await self._token_counter(**kwargs)  # type: ignore[misc]
+                        counted = await token_counter(
+                            model=self.model,
+                            contents=request.contents,
+                            config=count_config,
+                        )
+                    else:
+                        counted = await token_counter(
+                            model=self.model,
+                            contents=request.contents,
+                        )
                 else:
                     # Compatibility fallback for minimal test stubs accepting only (model, contents).
                     count_contents = list(request.contents)
@@ -626,14 +659,15 @@ class BudgetedAdkModel(BaseLlm):
                         ))
                     tool_text = "\n".join(
                         tool.model_dump_json(exclude_none=True)
-                        for tool in request.config.tools or []
+                        for tool in (request.config.tools or [])
+                        if isinstance(tool, BaseModel)
                     )
                     if tool_text:
                         count_contents.append(types.Content(
                             role="user",
                             parts=[types.Part.from_text(text=tool_text)],
                         ))
-                    counted = await self._token_counter(  # type: ignore[misc]
+                    counted = await token_counter(
                         model=self.model,
                         contents=count_contents,
                     )
@@ -673,7 +707,9 @@ class BudgetedAdkModel(BaseLlm):
         catalog_spec = load_model_catalog().get(self.model)
         thinking_level = catalog_spec.thinking_level if catalog_spec is not None else None
         if thinking_level:
-            request.config.thinking_config = types.ThinkingConfig(thinking_level=thinking_level)
+            request.config.thinking_config = types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel(thinking_level)
+            )
         request.config.http_options = types.HttpOptions(
             timeout=self._http_timeout_ms,
             retry_options=types.HttpRetryOptions(attempts=1),
@@ -688,10 +724,18 @@ class BudgetedAdkModel(BaseLlm):
 
         def sizes(current: LlmRequest) -> tuple[list[object], bool, bool, int, int]:
             all_parts = _request_parts(current)
-            images = [part for part in all_parts if _is_image_part(part)]
+            images = [
+                part
+                for part in all_parts
+                if isinstance(part, (types.Part, types.FunctionResponsePart))
+                and _is_image_part(part)
+            ]
             unsupported = any(
                 (getattr(part, "inline_data", None) or getattr(part, "file_data", None))
-                and not _is_image_part(part)
+                and not (
+                    isinstance(part, (types.Part, types.FunctionResponsePart))
+                    and _is_image_part(part)
+                )
                 for part in all_parts
             )
             text_bytes = sum(
@@ -778,9 +822,14 @@ class BudgetedAdkModel(BaseLlm):
         rates = _rates(self.model, now_iso)
         write_rate = _cache_write_rate(self.model, now_iso)
         reserve_rates = (write_rate, rates[1])
-        search_enabled = any(tool.google_search is not None for tool in request.config.tools or [])
+        tools_list = request.config.tools or []
+        search_enabled = any(
+            isinstance(tool, types.Tool) and tool.google_search is not None
+            for tool in tools_list
+        )
         web_enabled = search_enabled or any(
-            tool.url_context is not None for tool in request.config.tools or []
+            isinstance(tool, types.Tool) and tool.url_context is not None
+            for tool in tools_list
         )
         # Remote page/tool inputs aren't included in countTokens. Reserve the full
         # model context, plus an eight-query allowance (Google has no query cap).
@@ -975,7 +1024,8 @@ class BudgetedAdkModel(BaseLlm):
                 request_id,
             )
             raise ModelCallIndeterminate("ADK tool input usage invalid; reservation retained")
-        search_queries = len(getattr(response.grounding_metadata, "web_search_queries", None) or [])
+        grounding = getattr(response, "grounding_metadata", None)
+        search_queries = len(getattr(grounding, "web_search_queries", None) or [])
         actual = _microusd_with_cached_input(
             prompt,
             cached_tokens,

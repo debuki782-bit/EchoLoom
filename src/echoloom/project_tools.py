@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .runtime_contract import AgentTool as ToolUnion
-
 from .tool_timing import agent_function_tool
 
 _READ_ROOTS = frozenset({"docs", "prompts", "prompts.local", "src", "scripts"})

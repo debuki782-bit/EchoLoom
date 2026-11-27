@@ -23,7 +23,7 @@ class RecordingGateway:
     def __init__(self, config: GatewayConfig):
         self.config = config
         self.allowed = set(config.allowed_conversations)
-        self.contacts = {}
+        self.contacts: dict[str, object] = {}
         self.images: dict[str, bytes] = {}
         self.files: dict[str, bytes] = {}
         self.voices: dict[str, VoicePayload] = {}
@@ -31,14 +31,16 @@ class RecordingGateway:
         self.closed = False
 
     def parse_events(self, payload: object) -> tuple[MessageEvent, ...]:
-        if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
-            raise ValueError("recording callbacks require an events list")
+        if not isinstance(payload, dict):
+            raise TypeError("recording callbacks require an object payload")
+        if not isinstance(payload.get("events"), list):
+            raise TypeError("recording callbacks require an events list")
         if not 1 <= len(payload["events"]) <= 64:
             raise ValueError("invalid event count")
         events = []
         for row in payload["events"]:
             if not isinstance(row, dict):
-                raise ValueError("event must be an object")
+                raise TypeError("event must be an object")
             item = MessageEvent(**row)
             if (not all(isinstance(v, str) and v for v in (
                     item.account_id, item.conversation_id, item.sender_id))

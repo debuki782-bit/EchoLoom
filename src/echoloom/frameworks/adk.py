@@ -3,6 +3,7 @@ import inspect
 from contextvars import ContextVar
 from functools import wraps
 from types import SimpleNamespace
+from typing import Any
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError
@@ -66,10 +67,13 @@ def to_adk(tool):
         result = await result if inspect.isawaitable(result) else result
         return _convert_runtime_parts(result)
 
-    invoke.__signature__ = signature.replace(parameters=[
-        parameter.replace(annotation=ToolContext) if name == 'tool_context' else parameter
-        for name, parameter in signature.parameters.items()
-    ])
+    invoke_fn: Any = invoke
+    invoke_fn.__signature__ = signature.replace(
+        parameters=[
+            parameter.replace(annotation=ToolContext) if name == "tool_context" else parameter
+            for name, parameter in signature.parameters.items()
+        ]
+    )
     invoke.__annotations__ = {**function.__annotations__, 'tool_context': ToolContext}
     return FunctionTool(invoke)
 
@@ -112,6 +116,9 @@ class AdkFramework:
     def __init__(self, *, project_compaction=False, hydrate_first_session=False):
         self.uses_project_compaction = project_compaction
         self.hydrate_first_session = hydrate_first_session
+
+    def default_model(self):
+        raise ValueError("AdkFramework requires an explicit model instance")
 
     def sessions(self, database_path=None):
         if database_path is None:
@@ -225,7 +232,7 @@ class _Runner:
             for tool in self.adk_tools
             if (decl := tool._get_declaration()) is not None
         ]
-        tools = [types.Tool(function_declarations=declarations)] if declarations else []
+        tools: list[Any] = [types.Tool(function_declarations=declarations)] if declarations else []
         request = LlmRequest(
             model=getattr(self.model, "model", ""),
             contents=contents,

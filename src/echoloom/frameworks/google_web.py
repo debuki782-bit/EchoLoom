@@ -1,5 +1,6 @@
 """Isolated Google Search/URL Context helper, with retrieval evidence preserved."""
 
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from google.adk.models.base_llm import BaseLlm
@@ -23,7 +24,7 @@ def _url_identity(url):
 class GoogleWebModel(BaseLlm):
     """Keep URL retrieval status, which ADK's normal Gemini adapter discards."""
 
-    _client: object = PrivateAttr()
+    _client: Any = PrivateAttr()
 
     def __init__(self, model, client):
         super().__init__(model=model)

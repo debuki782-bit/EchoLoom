@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import base64
-from collections import OrderedDict
 import copy
 import hashlib
 import json
+from collections import OrderedDict
+from types import SimpleNamespace
 from typing import Any
 
 from google.adk.models.base_llm import BaseLlm
@@ -62,7 +63,7 @@ def _convert_tools(tools: list[types.Tool] | None) -> list[dict[str, Any]]:
             raw_schema: dict[str, Any] | None = getattr(decl, "parameters_json_schema", None)
             if raw_schema is None and getattr(decl, "parameters", None) is not None:
                 raw_schema = decl.parameters.model_dump(exclude_none=True)
-            parameters = (
+            parameters: dict[str, Any] = (
                 dict(raw_schema)
                 if isinstance(raw_schema, dict)
                 else {"type": "object", "properties": {}}
@@ -138,23 +139,28 @@ def _encode_function_output(fr: types.FunctionResponse) -> str | list[dict[str, 
     return text
 
 
+def _flush_message_blocks(
+    items: list[dict[str, Any]],
+    role: str,
+    message_blocks: list[dict[str, Any]],
+) -> None:
+    if message_blocks:
+        items.append({"role": role, "content": list(message_blocks)})
+        message_blocks.clear()
+
+
 def _convert_contents(contents: list[types.Content]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for index, content in enumerate(contents):
         role = "assistant" if getattr(content, "role", None) == "model" else "user"
         message_blocks: list[dict[str, Any]] = []
 
-        def flush_message() -> None:
-            if message_blocks:
-                items.append({"role": role, "content": list(message_blocks)})
-                message_blocks.clear()
-
         for part_idx, part in enumerate(getattr(content, "parts", None) or ()):
             if getattr(part, "thought", False):
                 continue
             fc = getattr(part, "function_call", None)
             if fc is not None:
-                flush_message()
+                _flush_message_blocks(items, role, message_blocks)
                 call_id = getattr(fc, "id", None) or f"adk_call_{index}_{part_idx}"
                 items.append(
                     {
@@ -167,7 +173,7 @@ def _convert_contents(contents: list[types.Content]) -> list[dict[str, Any]]:
                 continue
             fr = getattr(part, "function_response", None)
             if fr is not None:
-                flush_message()
+                _flush_message_blocks(items, role, message_blocks)
                 call_id = getattr(fr, "id", None) or f"adk_call_{index}_{part_idx}"
                 items.append(
                     {
@@ -194,7 +200,7 @@ def _convert_contents(contents: list[types.Content]) -> list[dict[str, Any]]:
             if isinstance(text, str) and text:
                 block_type = "output_text" if role == "assistant" else "input_text"
                 message_blocks.append({"type": block_type, "text": text})
-        flush_message()
+        _flush_message_blocks(items, role, message_blocks)
     return items
 
 
@@ -307,7 +313,12 @@ class OpenAIAdkModel(BaseLlm):
             elif item_type == "function_call":
                 raw_args = getattr(item, "arguments", None) or "{}"
                 try:
-                    args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+                    if isinstance(raw_args, str):
+                        args = json.loads(raw_args)
+                    elif isinstance(raw_args, SimpleNamespace):
+                        args = vars(raw_args)
+                    else:
+                        args = dict(raw_args)
                     if not isinstance(args, dict):
                         args = {"invalid_arguments": True}
                 except (ValueError, TypeError):

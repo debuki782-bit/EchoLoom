@@ -8,7 +8,6 @@ $taskScript = Join-Path $PSScriptRoot 'run-hook-event-extension.py'
 $taskPython = $null
 foreach ($candidate in @(
     $env:ECHOLOOM_PYTHON,
-    (Join-Path $taskRoot '.venv-openai\Scripts\python.exe'),
     (Join-Path $taskRoot '.venv\Scripts\python.exe')
 )) {
     if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { $taskPython = $candidate; break }
@@ -17,7 +16,7 @@ if (-not $taskPython) {
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd) { $taskPython = $cmd.Source }
 }
-if (-not $taskPython) { throw '未找到可用 Python 解释器（请创建 .venv/.venv-openai 或设置 ECHOLOOM_PYTHON）。' }
+if (-not $taskPython) { throw '未找到可用 Python 解释器（请创建 .venv 或设置 ECHOLOOM_PYTHON）。' }
 $taskOwners = @(Get-NetTCPConnection -LocalPort 30003 -State Listen -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique)
 if ($taskOwners.Count) {

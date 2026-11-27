@@ -559,6 +559,7 @@ def test_safety_block_redacts_model_request_snapshot(tmp_path: Path) -> None:
 
 def test_session_byte_estimate_does_not_count_image_payloads() -> None:
     from types import SimpleNamespace
+
     from echoloom.adk_runner import _estimated_event_bytes
 
     text_event = SimpleNamespace(content=SimpleNamespace(parts=[
@@ -588,7 +589,8 @@ def test_session_byte_estimate_does_not_count_image_payloads() -> None:
 def test_live_session_events_filters_rewound_invocations_without_adk_imports() -> None:
     import inspect
     from types import SimpleNamespace
-    import echoloom.session_runtime as session_runtime
+
+    from echoloom import session_runtime
     from echoloom.session_runtime import _live_session_events
 
     source = inspect.getsource(session_runtime)
@@ -623,6 +625,7 @@ def test_model_provider_unavailable_preserves_idle_session_seen_ids_and_hydratio
 ) -> None:
     from google.adk.events import Event, EventActions
     from pydantic import PrivateAttr
+
     from echoloom.runtime_contract import ModelCallIndeterminate, ModelProviderUnavailable
     from echoloom.session_runtime import _live_session_events, session_keys
 

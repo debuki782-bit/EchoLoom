@@ -1,6 +1,7 @@
 """Turn commit and follow-up scheduling tools."""
 
 import asyncio
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from ..turn_scope import (
     operation_id,
 )
 from .memory import MemoryToolset
+
+logger = logging.getLogger(__name__)
 
 
 class ReplyToolset:
@@ -77,6 +80,11 @@ class ReplyToolset:
         try:
             path = self._resolve_image(resolved_id)
         except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "event=reply_image_resolve_failed image_id=%s error_type=%s",
+                resolved_id,
+                type(exc).__name__,
+            )
             return {"status": "rejected", "reason": str(exc), "delivered": False}
         return await self.outbound.send_commit_image(
             resolved_id,

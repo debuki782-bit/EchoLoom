@@ -1,10 +1,9 @@
 import asyncio
 from pathlib import Path
 
-from echoloom.hook_status_recovery import observation_from_hook_status
 from echoloom.hook_outbound import HookSendResult
+from echoloom.hook_status_recovery import observation_from_hook_status
 from echoloom.pilot import Pilot
-
 
 ACCOUNT = "wxid_bot_account"
 ROOM = "58959893267@chatroom"

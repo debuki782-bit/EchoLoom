@@ -236,7 +236,7 @@ def _default_launch_native_service(
         )
         return False
 
-    venv_python = workspace / ".venv-openai" / "Scripts" / "python.exe"
+    venv_python = workspace / ".venv" / "Scripts" / "python.exe"
     python_exe = venv_python if venv_python.is_file() else Path(sys.executable)
     tmp_dir = workspace / ".tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -310,7 +310,7 @@ def download_spec(account_id: str, references: list[dict[str, str]]) -> dict | N
     if hd and MD5.fullmatch(values.get("hdmd5", "")):
         fileid, digest, image_type, length = hd, values["hdmd5"], 1, values.get("hdlength", "0")
     else:
-        fileid = values.get("cdnmidimgurl") or values.get("fileid")
+        fileid = values.get("cdnmidimgurl") or values.get("fileid") or ""
         digest, image_type, length = values.get("md5", ""), 2, values.get("length", "0")
     if (not fileid or len(fileid) > 4096 or "://" in fileid
             or not MD5.fullmatch(digest) or not length.isdigit()):

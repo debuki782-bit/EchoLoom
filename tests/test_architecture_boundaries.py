@@ -65,11 +65,12 @@ MODULE_LAYERS: dict[str, int] = {
     "hook_status_recovery": 1,
     "media": 1,
     "native_image_download": 1,
+    "openai_http": 1,
     "rich_message": 1,
     "wechat_gateway": 1,
     # Layer 2: SQLite persistence, usage ledger, repositories & schedulers.
     "conversation_scheduler": 2,
-    "episode_memory": 2,
+    "episode_store": 2,
     "event_book": 2,
     "memory_store": 2,
     "outbound_store": 2,
@@ -108,6 +109,7 @@ MODULE_LAYERS: dict[str, int] = {
     "cross_chat_dedupe": 5,
     "cross_session_tools": 5,
     "dashboard_memory": 5,
+    "episode_memory": 5,
     "frameworks.__init__": 5,
     "frameworks.adk": 5,
     "frameworks.adk_budget": 5,
@@ -259,9 +261,35 @@ def test_pure_policy_modules_stay_zero_io_and_zero_sdk() -> None:
                 assert node.module.split(".")[0] not in forbidden_roots, (name, node.module)
 
 
+def test_core_layers_forbid_llm_agent_sdk_imports() -> None:
+    """Layers 0..4 must remain independent of external LLM/Agent SDK packages."""
+    forbidden_sdk_roots = {"google", "openai"}
+    violations: list[str] = []
+    for path in sorted(SRC_PKG.rglob("*.py")):
+        mod = _module_name(path)
+        layer = MODULE_LAYERS[mod]
+        if layer >= 5:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if root in forbidden_sdk_roots:
+                        violations.append(f"{mod} (L{layer}) imports {alias.name}")
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                root = node.module.split(".")[0]
+                if root in forbidden_sdk_roots:
+                    violations.append(f"{mod} (L{layer}) imports {node.module}")
+    assert violations == []
+
+
 def test_removed_openai_agents_sdk_has_no_stale_references() -> None:
     lock_text = (ROOT / "requirements.lock").read_text(encoding="utf-8")
     assert "openai-agents==" not in lock_text
+    assert "openai==" not in lock_text
+    pyproject_text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"openai==' not in pyproject_text and "'openai==" not in pyproject_text
     arch_doc = (ROOT / "docs" / "architecture" / "current-architecture.md").read_text(
         encoding="utf-8"
     )
@@ -271,3 +299,12 @@ def test_removed_openai_agents_sdk_has_no_stale_references() -> None:
         ast.parse((SRC_PKG / "bootstrap.py").read_text(encoding="utf-8"))
     )
     assert bootstrap_doc is not None and "``agents``" not in bootstrap_doc
+    for folder in (SRC_PKG, ROOT / "tests"):
+        for path in sorted(folder.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        assert alias.name.split(".")[0] not in {"openai", "agents"}, path
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    assert node.module.split(".")[0] not in {"openai", "agents"}, path

@@ -7,7 +7,6 @@ $taskRoot = Split-Path -Parent $PSScriptRoot
 $taskPython = $null
 foreach ($candidate in @(
     $env:ECHOLOOM_PYTHON,
-    (Join-Path $taskRoot '.venv-openai\Scripts\python.exe'),
     (Join-Path $taskRoot '.venv\Scripts\python.exe')
 )) {
     if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { $taskPython = $candidate; break }
@@ -16,7 +15,7 @@ if (-not $taskPython) {
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd) { $taskPython = $cmd.Source }
 }
-if (-not $taskPython) { throw 'Python executable not found; create .venv/.venv-openai or set ECHOLOOM_PYTHON.' }
+if (-not $taskPython) { throw 'Python executable not found; create .venv or set ECHOLOOM_PYTHON.' }
 $taskScript = Join-Path $taskRoot 'scripts/run-native-image-download.py'
 $taskTemp = Join-Path $taskRoot '.tmp'
 New-Item -ItemType Directory -Force -Path $taskTemp | Out-Null

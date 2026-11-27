@@ -1,8 +1,8 @@
 """Pinned Hook callback decoding; no application policy is granted here."""
 import json
 
-from ..contacts import is_contact_id
 from ..connectors.base import MessageEvent, SenderOrigin
+from ..contacts import is_contact_id
 
 
 def archive_envelope(item: MessageEvent, *, preserve_raw: bool = False) -> dict:
@@ -85,6 +85,15 @@ def _parse_message(account: str, value: object, raw_envelope_json: str) -> Messa
             raise ValueError("invalid private routing shape")
         conversation_id = from_id
         sender_origin = "native_private_fromid"
+    hook_content_kind = {
+        1: "text",
+        3: "image",
+        34: "voice",
+        47: "sticker",
+        49: "app",
+        10000: "pat",
+        10002: "pat",
+    }.get(msg_type, "text" if msg_type == 1 else "app")
     return MessageEvent(
         account_id=account,
         conversation_id=conversation_id,
@@ -99,4 +108,5 @@ def _parse_message(account: str, value: object, raw_envelope_json: str) -> Messa
         raw_message_json=json.dumps(value, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":")),
         original_message_type=msg_type,
+        content_kind=hook_content_kind,
     )

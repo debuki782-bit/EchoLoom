@@ -8,6 +8,7 @@ import json
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Literal
 
 import httpx
 
@@ -149,12 +150,10 @@ class TelegramConnector(WebhookConnector):
             photos = msg.get("photo")
             voice = msg.get("voice") or msg.get("audio")
             reply_to = msg.get("reply_to_message")
-            original_type = 1
             content_kind = "text"
             text = str(msg.get("text") or msg.get("caption") or "")
 
             if isinstance(photos, list) and photos:
-                original_type = 3
                 content_kind = "image"
                 largest = photos[-1] if isinstance(photos[-1], Mapping) else {}
                 file_id = str(largest.get("file_id") or "").strip()
@@ -173,11 +172,9 @@ class TelegramConnector(WebhookConnector):
                     ensure_ascii=False,
                 )
             elif isinstance(voice, Mapping):
-                original_type = 34
                 content_kind = "voice"
                 text = json.dumps({"kind": "voice_message"}, ensure_ascii=False)
             elif isinstance(reply_to, Mapping):
-                original_type = 49
                 content_kind = "quote"
                 ref_sender = reply_to.get("from") or reply_to.get("sender_chat") or {}
                 ref_sender_id = (
@@ -226,7 +223,6 @@ class TelegramConnector(WebhookConnector):
                     raw_message_json=json.dumps(
                         dict(msg), ensure_ascii=False, sort_keys=True, separators=(",", ":")
                     ),
-                    original_message_type=original_type,
                     source_id=self.source_id,
                     channel=self.channel,
                     content_kind=content_kind,
@@ -234,7 +230,9 @@ class TelegramConnector(WebhookConnector):
             )
         return tuple(events)
 
-    def _post_telegram_json(self, method: str, payload: dict[str, object]) -> tuple[str, str]:
+    def _post_telegram_json(
+        self, method: str, payload: dict[str, object]
+    ) -> tuple[Literal["rejected", "queued", "unknown"], str]:
         self.outbound.append({"method": method, **payload})
         if not self.bot_token and not self.outbound_url:
             return "rejected", "missing_telegram_bot_token"

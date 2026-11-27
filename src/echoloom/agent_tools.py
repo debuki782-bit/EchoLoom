@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 
 from .runtime_contract import AgentTool as ToolUnion
-
 from .tool_timing import agent_function_tool
 
 

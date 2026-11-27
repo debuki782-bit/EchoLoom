@@ -166,6 +166,9 @@ def enrich_context_messages(
         else:
             data["conversation_gap_minutes"] = None
             data["sender_gap_minutes"] = None
+        raw_img = item.get("image")
+        raw_aud = item.get("audio")
+        raw_fil = item.get("file")
         data.update(
             {
                 "annotations": notes_by_message.get(cache_key or "", []),
@@ -177,17 +180,17 @@ def enrich_context_messages(
                 ),
                 "sender_tags": tags_by_message.get(cache_key or "", []),
                 "image": {
-                    **(dict(item["image"]) if isinstance(item.get("image"), Mapping) else {}),
+                    **(dict(raw_img) if isinstance(raw_img, Mapping) else {}),
                     **images_by_message.get(cache_key or "", {}),
                 }
                 or None,
                 "audio": {
-                    **(dict(item["audio"]) if isinstance(item.get("audio"), Mapping) else {}),
+                    **(dict(raw_aud) if isinstance(raw_aud, Mapping) else {}),
                     **audio_by_message.get(cache_key or "", {}),
                 }
                 or None,
                 "file": {
-                    **(dict(item["file"]) if isinstance(item.get("file"), Mapping) else {}),
+                    **(dict(raw_fil) if isinstance(raw_fil, Mapping) else {}),
                     **files_by_message.get(cache_key or "", {}),
                 }
                 or None,

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+logger = logging.getLogger(__name__)
 
 MAX_TEXT_READ_BYTES = 2_000_000
 MAX_OFFICE_ZIP_BYTES = 10_000_000
@@ -161,7 +164,8 @@ def extract_pdf_lines(
         if total_pages == 0 or total_pages > max_pages:
             return None
         page_texts = [page.extract_text() or "" for page in reader.pages]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("event=pdf_text_extract_skipped path=%s error_type=%s", path.name, type(exc).__name__)
         return None
 
     total_non_ws = 0

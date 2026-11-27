@@ -13,6 +13,7 @@ from echoloom.connectors import (
     ConnectorConfig,
     DiscordConnector,
     FeishuConnector,
+    MessageEvent,
     TelegramConnector,
     create_gateway,
 )
@@ -86,7 +87,8 @@ def test_telegram_connector_auth_parse_send_and_fetch_image(tmp_path: Path):
             },
         }
     )
-    assert photo_events[0].original_message_type == 3
+    assert photo_events[0].content_kind == "image"
+    assert photo_events[0].original_message_type is None
     refs = json.loads(photo_events[0].text)["image_references"]
     dest = tmp_path / "img.png"
     digest, mime = tg.fetch_original_image(photo_events[0], refs, dest)
@@ -219,10 +221,45 @@ def test_discord_connector_parse_auth_and_send(tmp_path: Path):
         }
     )
     assert len(events) == 1
-    assert events[0].original_message_type == 49
+    assert events[0].content_kind == "quote"
+    assert events[0].original_message_type is None
     assert events[0].source_msg_id == 123456789012345678
     assert dc.resolve_contact("user_5").nickname == "Bob"
 
     res = dc.send_text(ReplyDraft("op3", ConversationKey("bot_99", "chan_9"), "pong", 0))
     assert res.status == "queued"
     assert seen_auth[-1] == "Bot disc-bot-token"
+
+
+def test_scheduler_preserves_connector_channel_source_and_content_kind(tmp_path: Path):
+    import sqlite3
+
+    from echoloom.conversation_scheduler import ConversationScheduler
+
+    db = sqlite3.connect(tmp_path / "sched.sqlite3")
+    try:
+        scheduler = ConversationScheduler(db)
+        event = MessageEvent(
+            account_id="bot_99",
+            conversation_id="chan_9",
+            sender_id="user_5",
+            sender_origin="channel_group_member",
+            text='{"kind":"voice_message"}',
+            is_group=True,
+            message_type=1,
+            source_msg_id=None,
+            capture_tick_ms=1700000000000,
+            source_id="discord-main",
+            channel="discord",
+            content_kind="voice",
+        )
+        status, receipt = scheduler.enqueue(event)
+        assert status == "queued"
+        restored = scheduler._from_payload(scheduler._payload(event))
+        assert restored.source_id == "discord-main"
+        assert restored.channel == "discord"
+        assert restored.content_kind == "voice"
+        assert restored.original_message_type is None
+        assert scheduler.receipt_id(restored) == receipt
+    finally:
+        db.close()

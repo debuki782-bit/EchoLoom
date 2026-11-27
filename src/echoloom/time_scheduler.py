@@ -289,7 +289,13 @@ class TimeScheduler:
                 "consecutive_idle_events=consecutive_idle_events+1",
                 (account_id, now.isoformat()),
             )
-            event_number = int(self.account_activity_state(account_id)["consecutive_idle_events"])
+            state = self.account_activity_state(account_id)
+            raw_num = state.get("consecutive_idle_events") if state is not None else 0
+            event_number = (
+                raw_num
+                if isinstance(raw_num, int) and not isinstance(raw_num, bool)
+                else int(str(raw_num or 0))
+            )
             model_id = self.idle_model
             self.db.execute(
                 "INSERT INTO idle_event_runs VALUES (?,?,?,?,?,'running')",

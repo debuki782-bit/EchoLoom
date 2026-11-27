@@ -123,16 +123,16 @@ class WebToolset:
 
     async def read_web_page(self, url: str, comment_limit: int = 5,
                             comment_sort: str = "hot") -> dict:
-        url = _public_https_url(url)
-        if not url:
+        clean_url = _public_https_url(url)
+        if not clean_url:
             return {"ok": False, "error": "请提供一个公开网页的 HTTPS 地址。"}
         from .bilibili import BilibiliReader, is_bilibili_url
-        if is_bilibili_url(url):
+        if is_bilibili_url(clean_url):
             result = await BilibiliReader().read_video_page(
-                url, comment_limit=comment_limit, comment_sort=comment_sort)
+                clean_url, comment_limit=comment_limit, comment_sort=comment_sort)
             if result is not None:
                 return result
-        return await self.service.run(url, search=False)
+        return await self.service.run(clean_url, search=False)
 
     def agent_tools(self):
         return [agent_function_tool(self.search_web), agent_function_tool(self.read_web_page)]

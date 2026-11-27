@@ -8,6 +8,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+from .connectors.base import canonical_content_kind
 from .db_async import run_db
 from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
 from .memory_store import MemoryStore
@@ -36,11 +37,12 @@ class IngestedBatch:
 
 def entity_search_text(item: MessageEvent) -> str:
     """Extract clean plain text used for entity matching and quote context."""
-    if item.original_message_type in (3, 47):
+    kind = canonical_content_kind(item)
+    if kind in ("image", "sticker"):
         return "图片/表情消息"
-    if item.original_message_type == 34:
+    if kind == "voice":
         return "语音消息"
-    if item.original_message_type == 49:
+    if kind in ("file", "file_upload_notice", "app"):
         file_meta = normalized_file_metadata(item.text)
         if file_meta is not None:
             name = str(file_meta.get("filename") or "").strip()
@@ -169,10 +171,11 @@ class MessageIngestor:
             event_time = item.event_time_context or message_time_context(item.capture_tick_ms)
             message_times.append(event_time)
 
+            content_kind = canonical_content_kind(item)
             raw_message = _raw_message_dict(item)
             envelope = self.archive_envelope(item)
             source_record = dict(raw_message) if raw_message is not None else None
-            if item.original_message_type == 34:
+            if content_kind == "voice":
                 redact_voice_payload(envelope)
                 if source_record is not None:
                     redact_voice_payload(source_record)
@@ -193,7 +196,7 @@ class MessageIngestor:
             message_ids.append(archived.message_id)
 
             image_metadata: dict[str, object] | None = None
-            if item.original_message_type in (3, 47):
+            if content_kind in ("image", "sticker"):
                 refs = list(normalized_image_reference_records(item.text))
                 if self.image_ingestor is None:
                     image_metadata = {
@@ -211,7 +214,7 @@ class MessageIngestor:
                     )
 
             audio_metadata: dict[str, object] | None = None
-            if item.original_message_type == 34:
+            if content_kind == "voice":
                 if self.voice_ingestor is None:
                     audio_metadata = await run_db(
                         self.memory_store.fail_audio_ingest_for_message,
@@ -230,7 +233,7 @@ class MessageIngestor:
                     )
 
             file_metadata: dict[str, object] | None = None
-            if item.original_message_type == 49:
+            if content_kind in ("file", "app"):
                 parsed_file = normalized_file_metadata(item.text)
                 if parsed_file is not None and parsed_file.get("kind") == "file_message":
                     file_refs = list(normalized_file_references(item.text))

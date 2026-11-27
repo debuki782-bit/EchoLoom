@@ -8,7 +8,7 @@ import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from . import runtime_contract as types
@@ -20,8 +20,8 @@ from .runtime_contract import AgentFramework, ModelProviderUnavailable
 from .runtime_contract import RunOptions as RunConfig
 from .runtime_scope import model_usage_scope
 from .session_history import (
-    HISTORY_END,
-    HISTORY_START,
+    HISTORY_END,  # noqa: F401 - re-exported for session_runtime and tests
+    HISTORY_START,  # noqa: F401 - re-exported for session_runtime and tests
     MODEL_CONTEXT_LIMITS,
     SUMMARY_MAX_RETRIES,
     PreparedSession,
@@ -33,7 +33,7 @@ from .session_history import (
     live_session_events,
     route_hash,
     session_keys,
-    strip_injected_history,
+    strip_injected_history,  # noqa: F401 - re-exported for session_runtime and tests
     window_session_id,
 )
 from .session_recycle_policy import (
@@ -54,6 +54,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _gen_int(value: object, default: int = 0) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, (float, str)):
+        return int(value)
+    return default
+
+
 class SessionRolloverPolicy:
     """Owns active_sessions routing table, idle/size rollover, summaries, and safety fallback."""
 
@@ -61,7 +69,7 @@ class SessionRolloverPolicy:
         self,
         *,
         routing_db: sqlite3.Connection | None = None,
-        sessions: object | None = None,
+        sessions: Any = None,
         framework: AgentFramework | None = None,
         summary_model: object | None = None,
         summary_framework: AgentFramework | None = None,
@@ -185,7 +193,7 @@ class SessionRolloverPolicy:
         db.commit()
 
     def generation(self, route: str) -> int:
-        return int(self.route_state(route)["generation"])
+        return _gen_int(self.route_state(route)["generation"])
 
     def route_state(self, route: str) -> dict[str, object]:
         if self.routing_db is None:
@@ -249,7 +257,7 @@ class SessionRolloverPolicy:
                 "summary_only_generation=excluded.summary_only_generation",
                 (
                     route,
-                    int(state.get("generation", 0)),
+                    _gen_int(state.get("generation", 0)),
                     state.get("last_message_at"),
                     state.get("latest_summary"),
                     state.get("account_id"),
@@ -345,8 +353,8 @@ class SessionRolloverPolicy:
         self,
         window: ContextWindow,
         *,
-        count_tokens: Callable[[str, ContextWindow], Awaitable[int | None]] | None = None,
-        summarize_fn: Callable[..., object] | None = None,
+        count_tokens: Callable[..., Awaitable[int | None]] | None = None,
+        summarize_fn: Callable[..., Awaitable[str | None]] | None = None,
         now: datetime | None = None,
     ) -> PreparedSession:
         assert self.sessions is not None
@@ -355,7 +363,7 @@ class SessionRolloverPolicy:
         state = self.route_state(route)
         state["account_id"] = window.account_id
         state["conversation_id"] = window.conversation_id
-        generation = int(state["generation"])
+        generation = _gen_int(state["generation"])
         safety_recovery_turn = state.get("safety_recovery_generation") == generation
         summary_only_turn = state.get("summary_only_generation") == generation
         new_session = False
@@ -543,7 +551,7 @@ class SessionRolloverPolicy:
         *,
         after_run: object,
         safety_block_code: str | None,
-        summarize_fn: Callable[..., object] | None = None,
+        summarize_fn: Callable[..., Awaitable[str | None]] | None = None,
         freshness_held: bool = False,
         now: datetime | None = None,
     ) -> int:
@@ -621,7 +629,7 @@ class SessionRolloverPolicy:
         self,
         *,
         count_tokens: Callable[..., Awaitable[int | None]] | None = None,
-        summarize_fn: Callable[..., object] | None = None,
+        summarize_fn: Callable[..., Awaitable[str | None]] | None = None,
         now: datetime | None = None,
     ) -> int:
         """Summarize each idle session once, including after service downtime."""
@@ -657,7 +665,7 @@ class SessionRolloverPolicy:
                 and idle_seconds > cache_rule.idle_seconds
             )
             user_id, base_session_id = session_keys(account_id, conversation_id)
-            generation = int(state["generation"])
+            generation = _gen_int(state["generation"])
             session_id = window_session_id(base_session_id, generation)
             session = await self.sessions.get_session(
                 app_name="wechat_agent_mock",
@@ -851,10 +859,12 @@ class SessionRolloverPolicy:
         user_id: str,
         *,
         reason: str,
-        summarize_fn: Callable[..., object] | None = None,
+        summarize_fn: Callable[..., Awaitable[str | None]] | None = None,
     ) -> str | None:
         """Use the same bounded summary path for idle and safety-triggered rollover."""
-        fn = summarize_fn if summarize_fn is not None else self.summarize_session
+        fn: Callable[..., Awaitable[str | None]] = (
+            summarize_fn if summarize_fn is not None else self.summarize_session
+        )
         max_attempts = SUMMARY_MAX_RETRIES + 1
         try:
             accepts_reason = "reason" in inspect.signature(fn).parameters

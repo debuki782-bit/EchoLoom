@@ -6,13 +6,13 @@ independent of any desktop Hook, transport protocol, or platform-specific SDK.
 
 from __future__ import annotations
 
-import hmac
 import hashlib
+import hmac
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from ..models import ConversationKey, ReplyDraft
 
@@ -83,8 +83,8 @@ class ConnectorConfig:
     native_download_url: str | None = None
     base_url: str = "http://127.0.0.1:30001"
     contact_timeout_seconds: float = 0.75
-    transport: object = field(default=None, repr=False, compare=False)
-    text_sender: object = field(default=NotImplemented, repr=False, compare=False)
+    transport: Any = field(default=None, repr=False, compare=False)
+    text_sender: Any = field(default=NotImplemented, repr=False, compare=False)
     send_cooldown_range: tuple[float, float] = (0.55, 1.35)
     source_id: str = "default"
     channel: str = "wechat"
@@ -102,7 +102,8 @@ GatewayConfig = ConnectorConfig
 class ChannelConnector(Protocol):
     """Synchronous bounded connector boundary for inbound sources and outbound replies."""
 
-    capabilities: frozenset[str]
+    @property
+    def capabilities(self) -> frozenset[str]: ...
 
     def parse_events(self, payload: object) -> tuple[MessageEvent, ...]: ...
     def archive_envelope(self, item: MessageEvent, *, preserve_raw: bool = False) -> dict: ...
@@ -268,8 +269,7 @@ def verify_bearer_or_hmac(
             return False
     if hmac_secret:
         sig = norm.get("x-signature-256", "").strip()
-        if sig.startswith("sha256="):
-            sig = sig[7:]
+        sig = sig.removeprefix("sha256=")
         digest = hmac.new(hmac_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig.lower().encode("utf-8"), digest.encode("utf-8")):
             return False
@@ -331,3 +331,38 @@ def connector_fetch_received_file(
         return fn(item, references, destination)
     FileIngestError = import_module("echoloom.media_artifacts").FileIngestError
     raise FileIngestError("file_fetch_unsupported")
+
+
+_CONTENT_KIND_ALIASES: dict[str, str] = {
+    "message": "text",
+    "audio": "voice",
+    "reply": "quote",
+    "quoted_message": "quote",
+    "link": "app",
+    "card": "app",
+    "app_message": "app",
+    "pat_message": "pat",
+    "file_message": "file",
+}
+
+_LEGACY_TYPE_CONTENT_KINDS: dict[int, str] = {
+    3: "image",
+    47: "sticker",
+    34: "voice",
+    49: "app",
+    10000: "pat",
+    10002: "pat",
+}
+
+
+def canonical_content_kind(item: MessageEvent) -> str:
+    """Resolve channel-agnostic semantic content kind with legacy WeChat type fallback."""
+    raw_kind = (item.content_kind or "").strip().casefold()
+    if raw_kind:
+        normalized = _CONTENT_KIND_ALIASES.get(raw_kind, raw_kind)
+        if normalized != "text":
+            return normalized
+    legacy = item.original_message_type
+    if legacy is not None and legacy != 1:
+        return _LEGACY_TYPE_CONTENT_KINDS.get(legacy, "app")
+    return "text"

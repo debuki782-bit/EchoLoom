@@ -5,13 +5,22 @@ from __future__ import annotations
 import hashlib
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .db_async import register_thread_safe_db, unregister_thread_safe_db
 
 logger = logging.getLogger(__name__)
+
+
+def _state_int(state: Mapping[str, object], key: str) -> int:
+    val = state.get(key, 0)
+    if isinstance(val, int) and not isinstance(val, bool):
+        return val
+    if isinstance(val, (float, str)):
+        return int(val or 0)
+    return 0
 
 
 class OutboundReceiptStore:
@@ -417,8 +426,8 @@ class OutboundReceiptStore:
                 active_operation_id=scope,
                 receipt_ids=receipt_ids,
             )
-            failure_count = int(state.get("failure_count", 0) or 0)
-            send_attempt_count = int(state.get("send_attempt_count", 0) or 0)
+            failure_count = _state_int(state, "failure_count")
+            send_attempt_count = _state_int(state, "send_attempt_count")
             if (
                 send_attempt_count >= self.MAX_SEND_ATTEMPTS
                 or state.get("last_send_status") in ("queued", "accepted_by_server")
@@ -471,7 +480,7 @@ class OutboundReceiptStore:
                 active_operation_id=scope,
                 receipt_ids=receipt_ids,
             )
-            failure_count = int(state.get("failure_count", 0) or 0)
+            failure_count = _state_int(state, "failure_count")
             if failure_count >= self.MAX_SEND_ATTEMPTS:
                 return None
             receipt = hashlib.sha256(

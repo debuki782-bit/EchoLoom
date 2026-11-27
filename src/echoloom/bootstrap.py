@@ -13,9 +13,9 @@ import logging
 import os
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Mapping
-from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping
+from contextlib import ExitStack, asynccontextmanager, contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -27,11 +27,9 @@ from fastapi import FastAPI
 from . import local_config
 from .connectors.base import (
     AccountState,
-    GatewayConfig,
     WeChatGateway,
     connector_ensure_ready,
     connector_normalize_event,
-    create_gateway,
     default_gateway_factory,
 )
 from .connectors.registry import SourceRegistry
@@ -56,26 +54,6 @@ from .runtime_runners import build_runners as _build_runners_impl
 
 if TYPE_CHECKING:
     from .agent_profiles import AgentProfile, AgentProfiles
-    from .context_assembler import MessageContextAssembler
-    from .context_builder import ContextBuilder
-    from .cross_session import CrossSessionService
-    from .cross_session_tools import CrossSessionToolset
-    from .episode_memory import EpisodeMemory
-    from .event_book import EventBook
-    from .idle_tools import IdleActivityToolset
-    from .media import WeChatFileIngestor, WeChatImageIngestor, WeChatVoiceIngestor
-    from .memory_store import MemoryStore
-    from .message_ingestor import MessageIngestor
-    from .mock import SystemClock
-    from .model_overrides import ModelOverrideStore
-    from .outbound import OutboundService
-    from .project_tools import ProjectTools
-    from .storage import Repository
-    from .temporal_context import DailyEnvironmentProvider
-    from .time_scheduler import TimeScheduler
-    from .toolsets import MediaToolset, MemoryToolset, ReplyToolset, WorkspaceToolset
-    from .web_tools import WebSearchUsage
-    from .wechat_tools import WeChatTools
 
     class RefreshableGemini:  # pragma: no cover - lazily built in __getattr__
         def __init__(self, *, client_provider: Callable[[], Any] | None = None, **kwargs: Any): ...

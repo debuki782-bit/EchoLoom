@@ -297,7 +297,8 @@ def load_model_catalog(
         override_raw = _read_toml_file(local_config.vault_dir(root) / "models.toml")
     merged = _merge_catalog_dicts(base_raw, override_raw)
 
-    roles_raw = merged.get("roles") if isinstance(merged.get("roles"), dict) else {}
+    raw_roles_entry = merged.get("roles")
+    roles_raw: dict[str, Any] = raw_roles_entry if isinstance(raw_roles_entry, dict) else {}
     roles = ModelRoles(
         default_memory_model=str(roles_raw.get("default_memory_model") or "gpt-6-luna").strip(),
         decision_model=str(roles_raw.get("decision_model") or "gemini-decision-1").strip(),
@@ -330,7 +331,8 @@ def load_model_catalog(
         ),
     )
 
-    models_raw = merged.get("models") if isinstance(merged.get("models"), dict) else {}
+    raw_models_entry = merged.get("models")
+    models_raw: dict[str, Any] = raw_models_entry if isinstance(raw_models_entry, dict) else {}
     models = {
         mid: _parse_model_spec(mid, entry)
         for mid, entry in models_raw.items()

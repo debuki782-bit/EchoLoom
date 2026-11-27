@@ -79,7 +79,7 @@ def _parse_decision_answers(data: dict[str, Any]) -> tuple[dict[str, int], float
         return None
     percentages = {name: round(value * 100 / total) for name, value in probabilities.items()}
     # Keep the displayed distribution summing to exactly 100 after rounding.
-    leader = max(probabilities, key=probabilities.get)
+    leader = max(probabilities, key=lambda name: probabilities[name])
     percentages[leader] += 100 - sum(percentages.values())
     multi_answer = answers.get("multi_turn", {})
     multi = multi_answer.get("noul", 0.0)

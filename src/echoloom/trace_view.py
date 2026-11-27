@@ -11,14 +11,24 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, TypedDict
 
 DEFAULT_TRACE_DIR = Path(__file__).resolve().parents[2] / "data" / "session-traces"
 _RECORDS_CACHE: dict[
-    Path, tuple[tuple[tuple[str, int, int], ...], list[dict[str, object]]]
+    Path, tuple[tuple[tuple[str, int, int], ...], list[dict[str, Any]]]
 ] = {}
 
 
-def _record_epoch(record: dict[str, object]) -> float | None:
+class _ConversationSummary(TypedDict):
+    conversation_id: str
+    sessions: set[str]
+    turns: int
+    tool_calls: int
+    first: float | None
+    last: float | None
+
+
+def _record_epoch(record: dict[str, Any]) -> float | None:
     """Normalize event epoch floats and model_request ISO strings to epoch seconds."""
     stamp = record.get("timestamp")
     if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
@@ -56,7 +66,7 @@ def _dump(value: object) -> str:
 
 def load_records(
     trace_dir: Path, conversation_prefix: str = ""
-) -> list[dict[str, object]]:
+) -> list[dict[str, Any]]:
     """Load and chronologically merge all trace records, optionally per chat."""
     resolved = Path(trace_dir).resolve()
     files = sorted(resolved.glob("*.jsonl")) if resolved.is_dir() else []
@@ -106,7 +116,7 @@ def load_records(
 
 def summarize(trace_dir: Path) -> list[dict[str, object]]:
     """Group trace records per conversation: sessions, turns, tool calls, range."""
-    grouped: dict[str, dict[str, object]] = {}
+    grouped: dict[str, _ConversationSummary] = {}
     for record in load_records(trace_dir):
         conversation = str(record.get("conversation_id") or "(未知会话)")
         entry = grouped.setdefault(
@@ -123,22 +133,24 @@ def summarize(trace_dir: Path) -> list[dict[str, object]]:
         entry["sessions"].add(str(record.get("session_id") or ""))
         epoch = _record_epoch(record)
         if epoch is not None:
-            if entry["first"] is None or epoch < entry["first"]:
+            first_epoch = entry["first"]
+            if first_epoch is None or epoch < first_epoch:
                 entry["first"] = epoch
-            if entry["last"] is None or epoch > entry["last"]:
+            last_epoch = entry["last"]
+            if last_epoch is None or epoch > last_epoch:
                 entry["last"] = epoch
         if record.get("record") == "model_request":
-            entry["turns"] = int(entry["turns"]) + 1
+            entry["turns"] += 1
             continue
         for part in record.get("content") or []:
             if isinstance(part, dict) and "tool_call" in part:
-                entry["tool_calls"] = int(entry["tool_calls"]) + 1
-    rows = [
+                entry["tool_calls"] += 1
+    rows: list[dict[str, object]] = [
         {
-            "conversation_id": str(entry["conversation_id"]),
+            "conversation_id": entry["conversation_id"],
             "sessions": len(entry["sessions"]),
-            "turns": int(entry["turns"]),
-            "tool_calls": int(entry["tool_calls"]),
+            "turns": entry["turns"],
+            "tool_calls": entry["tool_calls"],
             "first": _format_time(entry["first"]),
             "last": _format_time(entry["last"]),
         }
@@ -149,7 +161,7 @@ def summarize(trace_dir: Path) -> list[dict[str, object]]:
 
 
 def render(
-    records: list[dict[str, object]],
+    records: list[dict[str, Any]],
     *,
     full: bool = False,
     text_limit: int = 4000,

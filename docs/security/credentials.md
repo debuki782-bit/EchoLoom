@@ -16,20 +16,20 @@
 在交互式 PowerShell 中隐藏输入保存 Key（不要把 Key 直接写在命令行参数或 `.env` 后提交）：
 
 ```powershell
-.\.venv-openai\Scripts\python.exe -m wechat_agent.credentials store --service model
-.\.venv-openai\Scripts\python.exe -m wechat_agent.credentials store --service openai
+.\.venv\Scripts\python.exe -m echoloom.credentials store --service model
+.\.venv\Scripts\python.exe -m echoloom.credentials store --service openai
 ```
 
 查询保存状态或删除凭据（`status` 只返回 `stored` / `missing`，不会输出明文）：
 
 ```powershell
-.\.venv-openai\Scripts\python.exe -m wechat_agent.credentials status --service model
-.\.venv-openai\Scripts\python.exe -m wechat_agent.credentials delete --service model
+.\.venv\Scripts\python.exe -m echoloom.credentials status --service model
+.\.venv\Scripts\python.exe -m echoloom.credentials delete --service model
 ```
 
 核验 `.local/` 状态并扫描仓库受跟踪文件是否存在敏感泄漏：
 
 ```powershell
-.\.venv-openai\Scripts\python.exe -m wechat_agent.local_config status
-.\.venv-openai\Scripts\python.exe -m wechat_agent.local_config audit
+.\.venv\Scripts\python.exe -m echoloom.local_config status
+.\.venv\Scripts\python.exe -m echoloom.local_config audit
 ```

@@ -8,6 +8,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Literal
 
 import httpx
 
@@ -55,12 +56,14 @@ class DiscordConnector(WebhookConnector):
         if not isinstance(payload, Mapping):
             raise TypeError("discord payload must be an object")
 
-        raw_msg = payload.get("d") if isinstance(payload.get("d"), Mapping) else payload
+        raw_d = payload.get("d")
+        raw_msg = raw_d if isinstance(raw_d, Mapping) else payload
         if not isinstance(raw_msg, Mapping):
             raise TypeError("discord payload missing message object")
 
         conversation_id = str(raw_msg.get("channel_id") or "").strip()
-        author = raw_msg.get("author") if isinstance(raw_msg.get("author"), Mapping) else {}
+        raw_author = raw_msg.get("author")
+        author: Mapping[str, Any] = raw_author if isinstance(raw_author, Mapping) else {}
         sender_id = str(author.get("id") or "").strip()
         if not conversation_id or not sender_id:
             raise ValueError("discord message requires channel_id and author.id")
@@ -93,7 +96,6 @@ class DiscordConnector(WebhookConnector):
         )
 
         text = str(raw_msg.get("content") or "")
-        original_type = 1
         content_kind = "text"
 
         if isinstance(attachments, list) and attachments:
@@ -102,7 +104,6 @@ class DiscordConnector(WebhookConnector):
             fname = str(first_att.get("filename") or "").casefold()
             att_url = _safe_remote_http_url(first_att.get("url"))
             if ctype.startswith("image/") or fname.endswith(_IMAGE_SUFFIXES):
-                original_type = 3
                 content_kind = "image"
                 image_key = str(first_att.get("id") or hashlib.sha256(
                     f"dc:{conversation_id}:{sender_id}:{capture_tick_ms}".encode()
@@ -115,12 +116,10 @@ class DiscordConnector(WebhookConnector):
                     ensure_ascii=False,
                 )
             elif ctype.startswith("audio/") or fname.endswith(_AUDIO_SUFFIXES):
-                original_type = 34
                 content_kind = "voice"
                 text = json.dumps({"kind": "voice_message"}, ensure_ascii=False)
 
-        if original_type == 1 and (ref_msg is not None or msg_ref is not None):
-            original_type = 49
+        if content_kind == "text" and (ref_msg is not None or msg_ref is not None):
             content_kind = "quote"
             ref_author = (
                 ref_msg.get("author")
@@ -167,7 +166,6 @@ class DiscordConnector(WebhookConnector):
                 raw_message_json=json.dumps(
                     dict(raw_msg), ensure_ascii=False, sort_keys=True, separators=(",", ":")
                 ),
-                original_message_type=original_type,
                 source_id=self.source_id,
                 channel=self.channel,
                 content_kind=content_kind,
@@ -178,7 +176,7 @@ class DiscordConnector(WebhookConnector):
         self,
         conversation_id: str,
         payload: dict[str, object],
-    ) -> tuple[str, str]:
+    ) -> tuple[Literal["rejected", "queued", "unknown"], str]:
         self.outbound.append({"channel_id": conversation_id, **payload})
         if not self.bot_token and not self.outbound_url:
             return "rejected", "missing_discord_bot_token"

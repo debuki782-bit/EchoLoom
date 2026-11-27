@@ -1,7 +1,8 @@
 """Application-owned Agent boundary. No provider or Agent SDK imports."""
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
 from types import SimpleNamespace
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 

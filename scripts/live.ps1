@@ -2,14 +2,14 @@
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $python=$null
-foreach($candidate in @($env:ECHOLOOM_PYTHON,(Join-Path $root '.venv-openai\Scripts\python.exe'),(Join-Path $root '.venv\Scripts\python.exe'))){
+foreach($candidate in @($env:ECHOLOOM_PYTHON,(Join-Path $root '.venv\Scripts\python.exe'))){
     if($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)){$python=$candidate;break}
 }
 if(-not $python){
     $cmd=Get-Command python -ErrorAction SilentlyContinue
     if($cmd){$python=$cmd.Source}
 }
-if(-not $python){throw 'Python executable not found; create .venv/.venv-openai or set ECHOLOOM_PYTHON'}
+if(-not $python){throw 'Python executable not found; create .venv or set ECHOLOOM_PYTHON'}
 $runtimeMetaJson=& $python -m echoloom.local_config runtime-json 2>$null
 $runtimeMeta=if($LASTEXITCODE -eq 0 -and $runtimeMetaJson){$runtimeMetaJson | ConvertFrom-Json}else{$null}
 $srvCfg=if($runtimeMeta -and $runtimeMeta.server){$runtimeMeta.server}else{[pscustomobject]@{ingress_host='127.0.0.1';ingress_port=8080}}

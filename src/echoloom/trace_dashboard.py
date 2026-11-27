@@ -80,8 +80,8 @@ def tool_inventory(records: list[dict]) -> list[dict]:
         policy = read_policy()
     except sqlite3.Error:
         policy = None
-    counts = Counter()
-    latest = {}
+    counts: Counter[str] = Counter()
+    latest: dict[str, str] = {}
     for record in records:
         if record.get("record") == "model_request":
             continue
@@ -140,8 +140,9 @@ def _transcript(records: list[dict]) -> list[dict]:
     entries: list[dict] = []
     pending: dict[tuple[str, str], deque] = defaultdict(deque)
     for record in records:
+        session_id = str(record.get("session_id") or "")
         common = {"time": _format_time(_record_epoch(record)),
-                  "session_id": str(record.get("session_id") or ""),
+                  "session_id": session_id,
                   "conversation_id": str(record.get("conversation_id") or ""),
                   "error": record.get("error_code") or record.get("run_error_type")}
         if record.get("record") == "model_request":
@@ -176,11 +177,11 @@ def _transcript(records: list[dict]) -> list[dict]:
                 entry = {**common, "kind": "tool", "name": name, "args": args,
                          "result": None, "result_time": None}
                 entries.append(entry)
-                pending[(common["session_id"], name)].append(entry)
+                pending[(session_id, name)].append(entry)
             if isinstance(part.get("tool_result"), dict):
                 response = part["tool_result"]
                 name = str(response.get("name") or "")
-                queue = pending[(common["session_id"], name)]
+                queue = pending[(session_id, name)]
                 if queue:
                     target = queue.popleft()
                     target["result"] = response.get("result")
@@ -306,8 +307,11 @@ def create_trace_dashboard(
             if conversation and str(row.get("conversation_id") or "") != conversation:
                 continue
             is_request = row.get("record") == "model_request"
-            has_tool = any(isinstance(part, dict) and ("tool_call" in part or "tool_result" in part)
-                           for part in row.get("content") or [])
+            row_content = row.get("content")
+            has_tool = isinstance(row_content, list) and any(
+                isinstance(part, dict) and ("tool_call" in part or "tool_result" in part)
+                for part in row_content
+            )
             if ((kind == "events" and is_request) or (kind == "requests" and not is_request)
                     or (kind == "tools" and (is_request or not has_tool))):
                 continue

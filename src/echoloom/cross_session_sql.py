@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import Sequence
@@ -10,6 +11,8 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from .context import render_message_body
+
+logger = logging.getLogger(__name__)
 
 TABLE_COLUMNS: dict[str, frozenset[str]] = {
     "source_messages": frozenset(
@@ -301,6 +304,7 @@ def execute_scoped_readonly_sql(
             "truncated": len(rows) > len(values),
         }
     except Exception as exc:  # noqa: BLE001
+        logger.debug("event=cross_session_sql_rejected error_type=%s", type(exc).__name__)
         return {"status": "rejected", "reason": type(exc).__name__}
     finally:
         if conn is not None:

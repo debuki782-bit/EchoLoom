@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import logging
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,22 @@ logger = logging.getLogger(__name__)
 
 
 _ROLES = load_model_catalog().roles
+
+
+def _current_message_ids(ctx: Mapping[str, object]) -> tuple[str, ...]:
+    raw_ids = ctx.get("current_message_ids")
+    if isinstance(raw_ids, (list, tuple)) and raw_ids:
+        return tuple(item for item in raw_ids if isinstance(item, str) and item)
+    fallback = ctx.get("message_id")
+    return (fallback,) if isinstance(fallback, str) and fallback else ()
+
+
+def _coerce_display_order(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float, str)):
+        return int(value)
+    return 0
 
 
 class MediaToolset:
@@ -199,7 +216,7 @@ class MediaToolset:
                     "thumbnail": True,
                     "description": str(image.get("description") or "")[:4000],
                     "quick_send": bool(image.get("quick_send")),
-                    "display_order": int(image.get("display_order") or 0),
+                    "display_order": _coerce_display_order(image.get("display_order") or 0),
                 }
                 short_ref = image_refs.get(("image", image_id))
                 if short_ref:
@@ -403,10 +420,7 @@ class MediaToolset:
         ctx = memory_context.get()
         if not self.memory_store or not ctx or ctx.get("account_id") != self.account:
             return {"error": "current_conversation_unavailable"}
-        current_ids = ctx.get("current_message_ids") or (ctx.get("message_id"),)
-        for message_id in reversed(current_ids):
-            if not isinstance(message_id, str) or not message_id:
-                continue
+        for message_id in reversed(_current_message_ids(ctx)):
             current_image = self.memory_store.image_metadata_for_message(
                 account_id=self.account, message_id=message_id,
             )
@@ -498,7 +512,7 @@ class MediaToolset:
                 config=types.GenerateContentConfig(
                     max_output_tokens=max_output_tokens,
                     candidate_count=1,
-                    thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+                    thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
                     http_options=types.HttpOptions(
                         timeout=60_000,
                         retry_options=types.HttpRetryOptions(attempts=1),
@@ -687,10 +701,7 @@ class MediaToolset:
         ctx = memory_context.get()
         if not self.memory_store or not ctx or ctx.get("account_id") != self.account:
             return {"error": "current_conversation_unavailable"}
-        current_ids = ctx.get("current_message_ids") or (ctx.get("message_id"),)
-        for message_id in reversed(current_ids):
-            if not isinstance(message_id, str) or not message_id:
-                continue
+        for message_id in reversed(_current_message_ids(ctx)):
             image = self.memory_store.image_metadata_for_message(
                 account_id=self.account, message_id=message_id,
             )
@@ -734,10 +745,7 @@ class MediaToolset:
             return None, {"error": "current_conversation_unavailable"}
         ref = file_reference.strip()
         if ref.casefold() in {"latest", "current", "latest_file"}:
-            current_ids = ctx.get("current_message_ids") or (ctx.get("message_id"),)
-            for message_id in reversed(current_ids):
-                if not isinstance(message_id, str) or not message_id:
-                    continue
+            for message_id in reversed(_current_message_ids(ctx)):
                 meta = self.memory_store.file_metadata_for_message(
                     account_id=self.account, message_id=message_id,
                 )
@@ -778,7 +786,13 @@ class MediaToolset:
                 )
         if found is None:
             return None, {"error": "file_not_found", "file_reference": ref}
-        allowed = set(ctx.get("allowed_conversations") or ()) | {self.room}
+        raw_allowed = ctx.get("allowed_conversations")
+        allowed_items = (
+            [item for item in raw_allowed if isinstance(item, str) and item]
+            if isinstance(raw_allowed, (list, tuple, set, frozenset))
+            else []
+        )
+        allowed = set(allowed_items) | {self.room}
         if str(found.get("conversation_id") or "") not in allowed:
             return None, {"error": "file_outside_current_context"}
         return found, None
@@ -1219,7 +1233,12 @@ class MediaToolset:
             usage = getattr(response, "usage", None)
             incoming = getattr(usage, "input_tokens", None)
             outgoing = getattr(usage, "output_tokens", None)
-            if any(type(n) is not int or n < 0 for n in (incoming, outgoing)):
+            if (
+                type(incoming) is not int
+                or type(outgoing) is not int
+                or incoming < 0
+                or outgoing < 0
+            ):
                 raise ValueError("image generation usage missing")
             self.usage.settle(request_id, incoming * 5 + outgoing * 30)
             items = getattr(response, "data", None) or []

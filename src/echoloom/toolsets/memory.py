@@ -103,7 +103,8 @@ class MemoryToolset:
             )
             return {"status": "rejected", "reason": reason}
         if not is_idle and requested_source and requested_source != default_source:
-            visible_ids = ctx.get("message_ids") or ()
+            raw_visible = ctx.get("message_ids")
+            visible_ids = raw_visible if isinstance(raw_visible, (set, tuple, list)) else ()
             if (
                 requested_source not in visible_ids
                 and self._message_conversation(ctx, requested_source) is None

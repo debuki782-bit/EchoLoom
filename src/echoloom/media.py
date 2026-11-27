@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import importlib
 import io
 import json
+import logging
 import mimetypes
 import re
 import tempfile
 import wave
+from collections.abc import Buffer
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from PIL import Image, ImageDraw
@@ -32,6 +35,7 @@ if TYPE_CHECKING:
 
 MAX_MODEL_IMAGE_BYTES = 14_000_000
 MAX_GIF_FRAME_PIXELS = 40_000_000
+logger = logging.getLogger(__name__)
 
 
 
@@ -92,9 +96,9 @@ class WeChatImageIngestor:
 
     def __init__(self, workspace: Path, *, source_root: Path | None = None,
                  transport: httpx.BaseTransport | None = None,
-                 native_download_url: str | None = None, gateway=None):
+                 native_download_url: str | None = None, gateway: Any = None):
         self.workspace = Path(workspace)
-        self.gateway = gateway if gateway is not None else create_gateway(GatewayConfig(
+        self.gateway: Any = gateway if gateway is not None else create_gateway(GatewayConfig(
             self.workspace, source_root=source_root, transport=transport,
             native_download_url=native_download_url,
         ))
@@ -422,7 +426,7 @@ class WeChatVoiceIngestor:
                     account_id=item.account_id, message_id=message_id,
                 ) or {"state": "failed", "error_code": "stored_audio_unavailable"}
 
-            import pysilk
+            pysilk = importlib.import_module("pysilk")
 
             pcm = _BoundedBuffer(self.MAX_PCM_BYTES)
             pysilk.decode(io.BytesIO(silk), pcm, self.SAMPLE_RATE)
@@ -457,7 +461,8 @@ class WeChatVoiceIngestor:
                 account_id=item.account_id, message_id=message_id,
                 error_code="silk_decoder_unavailable",
             )
-        except Exception:  # noqa: BLE001 - media failure must not block the text turn
+        except Exception as exc:  # noqa: BLE001 - media failure must not block the text turn
+            logger.warning("event=voice_ingest_failed error_type=%s", type(exc).__name__)
             return store.fail_audio_ingest_for_message(
                 account_id=item.account_id, message_id=message_id,
                 error_code="voice_decode_failed",
@@ -476,8 +481,8 @@ class _BoundedBuffer(io.BytesIO):
         super().__init__()
         self.limit = limit
 
-    def write(self, data: bytes) -> int:
-        if self.tell() + len(data) > self.limit:
+    def write(self, data: Buffer) -> int:
+        if self.tell() + len(memoryview(data)) > self.limit:
             raise ValueError("decoded voice exceeds duration limit")
         return super().write(data)
 
@@ -589,7 +594,8 @@ class WeChatFileIngestor:
                 expected_bytes=expected_bytes,
                 expected_md5=expected_md5,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("event=file_ingest_failed error_type=%s", type(exc).__name__)
             return store.fail_file_ingest_for_message(
                 account_id=item.account_id,
                 message_id=message_id,

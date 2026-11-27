@@ -363,8 +363,8 @@ class Ingress:
             attempts = read_attempt_counts(self.db)
         worker_alive = bool(hb is not None and hb.get("alive"))
         in_flight: dict[str, object] | None = None
-        if worker_alive and hb is not None and isinstance(hb.get("in_flight"), dict):
-            raw_flight = hb["in_flight"]
+        raw_flight = hb.get("in_flight") if (worker_alive and hb is not None) else None
+        if isinstance(raw_flight, dict):
             elapsed = raw_flight.get("elapsed_seconds")
             started_at = raw_flight.get("started_at")
             if isinstance(started_at, str):
@@ -386,6 +386,14 @@ class Ingress:
                 "message_type": raw_flight.get("message_type"),
                 "elapsed_seconds": 0.0 if elapsed is None else elapsed,
             }
+        raw_followups = hb.get("scheduled_followups") if (worker_alive and hb) else None
+        scheduled_followups = (
+            raw_followups
+            if isinstance(raw_followups, int) and not isinstance(raw_followups, bool)
+            else int(str(raw_followups or 0))
+            if isinstance(raw_followups, (float, str))
+            else 0
+        )
         return {
             "mode": self.mode,
             "tool_control_version": 1,
@@ -398,9 +406,7 @@ class Ingress:
             "last_events": list(self.events),
             "queue": queue,
             "queue_including_failed": queue_incl_failed,
-            "scheduled_followups": (
-                int(hb.get("scheduled_followups") or 0) if (worker_alive and hb) else 0
-            ),
+            "scheduled_followups": scheduled_followups,
             "in_flight": in_flight,
             "inbox_states": inbox_states,
             "inbox_failures": inbox_failures,

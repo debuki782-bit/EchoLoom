@@ -38,12 +38,14 @@ def normalize_message(item: MessageEvent) -> MessageEvent | None:
                 or not is_contact_id(pat.get("target_id"))):
             return None
         return replace(item, message_type=1,
+                       content_kind="pat",
                        original_message_type=item.original_message_type or item.message_type)
     if item.message_type == 3:
         refs = extract_image_references(item.text, item.sender_id if item.is_group else None)
         image_result = {"kind": "image_message", "image_references": refs}
         return replace(item, message_type=1,
                        text=json.dumps(image_result, ensure_ascii=False),
+                       content_kind="image",
                        original_message_type=item.original_message_type or item.message_type)
     if item.message_type == 47:
         # Type 47 carries sticker/GIF media references in XML. Keep the same
@@ -54,6 +56,7 @@ def normalize_message(item: MessageEvent) -> MessageEvent | None:
             item, message_type=1,
             text=json.dumps({"kind": "image_message", "media_kind": "sticker",
                              "image_references": refs}, ensure_ascii=False),
+            content_kind="sticker",
             original_message_type=item.original_message_type or item.message_type,
         )
     if item.message_type == 34:
@@ -62,6 +65,7 @@ def normalize_message(item: MessageEvent) -> MessageEvent | None:
         return replace(
             item, message_type=1,
             text=json.dumps({"kind": "voice_message"}, ensure_ascii=False),
+            content_kind="voice",
             original_message_type=item.original_message_type or item.message_type,
         )
     if item.message_type != 49:
@@ -119,6 +123,7 @@ def normalize_message(item: MessageEvent) -> MessageEvent | None:
             "content": (ref.findtext("content") or "")[:8192],
         }
     return replace(item, message_type=1, text=json.dumps(app_result, ensure_ascii=False),
+                   content_kind="quote" if app_result.get("kind") == "quoted_message" else "app",
                    original_message_type=item.original_message_type or item.message_type)
 
 
@@ -281,6 +286,7 @@ def _normalize_file_app_message(item: MessageEvent, app: ET.Element, app_type: s
             item,
             message_type=1,
             text=json.dumps(payload, ensure_ascii=False),
+            content_kind="file_upload_notice",
             original_message_type=item.original_message_type or item.message_type,
         )
 
@@ -302,6 +308,7 @@ def _normalize_file_app_message(item: MessageEvent, app: ET.Element, app_type: s
         item,
         message_type=1,
         text=json.dumps(file_result, ensure_ascii=False),
+        content_kind="file",
         original_message_type=item.original_message_type or item.message_type,
     )
 
