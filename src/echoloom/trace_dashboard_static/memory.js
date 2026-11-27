@@ -1,7 +1,7 @@
 (() => {
   const ui = window.EchoLoomUI;
   if (!ui) return;
-  const {$, el, clear, api, mutate, toast, shortTime, displayName, chatTitle, mergeNames, confirmButton} = ui;
+  const {$, el, clear, api, mutate, toast, shortTime, displayName, shortRef, chatTitle, mergeNames, mergeShortRefs, confirmButton} = ui;
 
   const memState = {
     tab: 'facts',
@@ -39,6 +39,13 @@
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 
+  function refTag(ref, rawId) {
+    if (!ref) return null;
+    const tag = el('span', 'ref-tag', ref);
+    if (rawId) tag.title = rawId;
+    return tag;
+  }
+
   function provenanceBox(label, sources) {
     const valid = (sources || []).filter(Boolean);
     if (!valid.length) return null;
@@ -48,16 +55,21 @@
     for (const src of valid) {
       const box = el('div', 'provenance-item');
       const meta = el('div', 'provenance-meta');
+      const chatRef = shortRef(src.conversation_id || '');
+      const senderRef = shortRef(src.sender_id || '');
+      const msgRef = src.source_short_ref || src.short_ref || '';
       const chatSpan = el('span', '', chatTitle(src.conversation_id || ''));
-      if (src.conversation_id) chatSpan.title = src.conversation_id;
+      if (src.conversation_id) chatSpan.title = chatRef ? `${chatRef} · ${src.conversation_id}` : src.conversation_id;
       const senderSpan = el('span', '', displayName(src.sender_id || '') || '未知发送人');
-      if (src.sender_id) senderSpan.title = src.sender_id;
-      meta.append(
-        chatSpan,
-        document.createTextNode(' · '),
-        senderSpan,
-        document.createTextNode(` · ${shortTime(src.captured_at)} · ${src.message_id}`),
-      );
+      if (src.sender_id) senderSpan.title = senderRef ? `${senderRef} · ${src.sender_id}` : src.sender_id;
+      meta.append(chatSpan, document.createTextNode(' · '), senderSpan, document.createTextNode(` · ${shortTime(src.captured_at)} · `));
+      if (msgRef) {
+        meta.append(refTag(msgRef, src.message_id || ''));
+      } else {
+        const midSpan = el('span', '', src.message_id || '');
+        if (src.message_id) midSpan.title = src.message_id;
+        meta.append(midSpan);
+      }
       box.append(
         meta,
         el('div', 'provenance-body', src.body_text || '（无正文）'),
@@ -175,9 +187,11 @@
         allOpt.value = '';
         sel.append(allOpt);
         for (const c of convs) {
-          const opt = el('option', '', `${chatTitle(c.conversation_id)}（${c.count} 条${c.bloated ? ' · 待合并' : ''}）`);
+          const ref = shortRef(c.conversation_id);
+          const refLabel = ref ? ` [${ref}]` : '';
+          const opt = el('option', '', `${chatTitle(c.conversation_id)}${refLabel}（${c.count} 条${c.bloated ? ' · 待合并' : ''}）`);
           opt.value = c.conversation_id;
-          opt.title = c.conversation_id;
+          opt.title = ref ? `${ref} · ${c.conversation_id}` : c.conversation_id;
           if (c.conversation_id === memState.episodeConversation) opt.selected = true;
           sel.append(opt);
         }
@@ -212,10 +226,11 @@
       msgSelect.append(defaultOpt);
       for (const m of memState.recentMessages) {
         const senderLabel = displayName(m.sender_id) || '未知发送人';
-        const preview = `${shortTime(m.captured_at)} · ${senderLabel}：${m.body_text.slice(0, 32)}`;
+        const refPrefix = m.short_ref ? `${m.short_ref} · ` : '';
+        const preview = `${refPrefix}${shortTime(m.captured_at)} · ${senderLabel}：${m.body_text.slice(0, 32)}`;
         const opt = el('option', '', preview);
         opt.value = m.message_id;
-        opt.title = `${m.conversation_id || ''} / ${m.sender_id || ''} · ${m.message_id}`;
+        opt.title = `${m.short_ref ? `${m.short_ref} · ` : ''}${m.conversation_id || ''} / ${m.sender_id || ''} · ${m.message_id}`;
         msgSelect.append(opt);
       }
       const msgIdInput = el('input', 'sender-input');
@@ -426,10 +441,14 @@
       const row = el('article', 'memory-row');
       const top = el('div', 'memory-row-head');
       const badges = el('div', 'chip-row');
+      const evtRef = refTag(evt.short_ref, evt.event_id);
+      if (evtRef) badges.append(evtRef);
       badges.append(el('span', `chip ${evt.priority === 'high' ? 'chip-ok' : 'chip-muted'}`, evt.priority === 'high' ? '高优' : '普通'));
       if (evt.stale_72h) badges.append(el('span', 'chip chip-warn', '超 72h 待复核'));
       if (evt.expires_at) badges.append(el('span', 'chip chip-muted', `到期 ${shortTime(evt.expires_at)}`));
-      badges.append(el('span', 'event-time', `${evt.age_hours}h 前更新 · ${evt.event_id}`));
+      const evtTime = el('span', 'event-time', evt.short_ref ? `${evt.age_hours}h 前更新` : `${evt.age_hours}h 前更新 · ${evt.event_id}`);
+      evtTime.title = evt.event_id;
+      badges.append(evtTime);
 
       const actions = el('div', 'memory-actions');
       const editBtn = el('button', 'subtle-btn', memState.editingId === evt.event_id ? '取消' : '编辑');
@@ -516,6 +535,8 @@
       const badges = el('div', 'chip-row');
       const entityAuthorTime = el('span', 'event-time', `${displayName(item.author_id) || item.author_id} · ${shortTime(item.updated_at)}`);
       if (item.author_id) entityAuthorTime.title = item.author_id;
+      const entRef = refTag(item.short_ref, item.entity_id);
+      if (entRef) badges.append(entRef);
       badges.append(el('strong', 'entity-term', item.term), el('span', 'chip chip-muted', `v${item.version}`), entityAuthorTime);
       const actions = el('div', 'memory-actions');
       const editBtn = el('button', 'subtle-btn', memState.editingId === item.entity_id ? '取消' : '编辑');
@@ -584,6 +605,8 @@
       const badges = el('div', 'chip-row');
       const noteAuthorTime = el('span', 'event-time', `${displayName(note.author_id) || note.author_id} · ${shortTime(note.updated_at)}`);
       if (note.author_id) noteAuthorTime.title = note.author_id;
+      const noteRef = refTag(note.short_ref, note.note_id);
+      if (noteRef) badges.append(noteRef);
       badges.append(
         el('span', 'chip chip-muted', note.source),
         el('span', 'chip chip-muted', `v${note.version}`),
@@ -669,6 +692,8 @@
       const row = el('article', 'memory-row');
       const top = el('div', 'memory-row-head');
       const badges = el('div', 'chip-row');
+      const convRef = refTag(shortRef(ep.conversation_id), ep.conversation_id);
+      if (convRef) badges.append(convRef);
       const convBadge = el('span', 'chip chip-muted', chatTitle(ep.conversation_id));
       if (ep.conversation_id) convBadge.title = ep.conversation_id;
       badges.append(convBadge);
@@ -766,6 +791,7 @@
       memState.accountId = summary.account_id || '';
       memState.loaded = true;
       if (summary.names) mergeNames(summary.names);
+      if (summary.short_refs) mergeShortRefs(summary.short_refs);
       renderAccountSelect();
       renderStats();
       await loadActiveTab();
@@ -832,6 +858,7 @@
         memState.accounts = summary.accounts || [];
         memState.accountId = summary.account_id || '';
         if (summary.names) mergeNames(summary.names);
+        if (summary.short_refs) mergeShortRefs(summary.short_refs);
         renderAccountSelect();
         renderStats();
       } catch {}

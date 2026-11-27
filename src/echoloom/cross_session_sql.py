@@ -166,6 +166,15 @@ TABLE_COLUMNS: dict[str, frozenset[str]] = {
             "finished_at",
         }
     ),
+    "short_refs": frozenset(
+        {
+            "account_id",
+            "kind",
+            "short_ref",
+            "target_id",
+            "created_at",
+        }
+    ),
 }
 
 ALLOWED_SQL_ACTIONS = frozenset(

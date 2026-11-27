@@ -3,6 +3,7 @@ const state = {
   brandName: 'EchoLoom',
   overview: null,
   names: {},
+  shortRefs: {},
   conversation: '',
   view: 'chat',
   timelineOffset: 0,
@@ -107,6 +108,11 @@ function displayName(id) {
   if (raw.startsWith('idle-event:')) return `空闲活动 · ${raw.slice(-8)}`;
   return state.names[raw] || raw;
 }
+function shortRef(id) {
+  const raw = String(id || '').trim();
+  if (!raw) return '';
+  return state.shortRefs[raw] || '';
+}
 function chatTitle(id) {
   const raw = String(id || '').trim();
   if (!raw) return '未知会话';
@@ -137,6 +143,22 @@ function mergeNames(names) {
     if (state.calls.length) renderCalls();
   }
 }
+function mergeShortRefs(refs) {
+  if (!refs || typeof refs !== 'object') return;
+  let changed = false;
+  for (const [id, ref] of Object.entries(refs)) {
+    const key = String(id || '').trim();
+    const val = String(ref || '').trim();
+    if (key && val && state.shortRefs[key] !== val) {
+      state.shortRefs[key] = val;
+      changed = true;
+    }
+  }
+  if (changed) {
+    renderChats();
+    updateSelectedChatHeader();
+  }
+}
 function chatType(id) {
   return id.startsWith('idle-event:')
     ? '空闲活动'
@@ -153,15 +175,19 @@ function setView(view) {
 }
 function renderChats() {
   const list = $('#chat-list'); clear(list); const q = $('#chat-search').value.toLowerCase();
-  const rows = (state.overview?.conversations || []).filter(c => c.id && `${c.id} ${chatTitle(c.id)}`.toLowerCase().includes(q));
+  const rows = (state.overview?.conversations || []).filter(c => c.id && `${c.id} ${chatTitle(c.id)} ${shortRef(c.id)}`.toLowerCase().includes(q));
   for (const group of ['会话', '空闲活动']) {
     const items = rows.filter(r => group === '空闲活动' ? r.id.startsWith('idle-event:') : !r.id.startsWith('idle-event:'));
     if (!items.length) continue;
     list.append(el('div', 'chat-group-label', group));
     for (const row of items) {
+      const ref = shortRef(row.id);
       const button = el('button', `chat-item${state.conversation === row.id ? ' active' : ''}`); button.type = 'button';
-      button.title = row.id;
-      button.append(el('div', 'chat-title', chatTitle(row.id)), el('div', 'chat-sub', `${chatType(row.id)} · ${shortTime(row.last)}`));
+      button.title = ref ? `${ref} · ${row.id}` : row.id;
+      button.append(
+        el('div', 'chat-title', chatTitle(row.id)),
+        el('div', 'chat-sub', `${chatType(row.id)}${ref ? ` · ${ref}` : ''} · ${shortTime(row.last)}`),
+      );
       button.addEventListener('click', () => selectChat(row.id)); list.append(button);
     }
   }
@@ -275,18 +301,21 @@ function updateSelectedChatHeader() {
   if (!id) return;
   const titleNode = $('#selected-chat');
   const metaNode = $('#selected-meta');
+  const ref = shortRef(id);
   titleNode.textContent = chatTitle(id);
-  titleNode.title = id;
+  titleNode.title = ref ? `${ref} · ${id}` : id;
   const row = state.overview?.conversations?.find(x => x.id === id);
+  const idLabel = ref || id;
   metaNode.textContent = row
-    ? `${chatType(id)} · ${id} · ${row.sessions} 代 Session · ${row.tool_calls} 次工具调用 · ${row.first} 至 ${row.last}`
-    : id;
+    ? `${chatType(id)} · ${idLabel} · ${row.sessions} 代 Session · ${row.tool_calls} 次工具调用 · ${row.first} 至 ${row.last}`
+    : (ref ? `${ref} · ${id}` : id);
   metaNode.title = id;
 }
 async function refresh() {
   try {
     state.overview = await api('/api/overview');
     state.names = { ...(state.overview?.names || {}) };
+    state.shortRefs = { ...(state.overview?.short_refs || {}) };
     if (state.overview?.brand_name) {
       state.brandName = String(state.overview.brand_name);
       document.title = `${state.brandName} · 对话与运行记录`;
@@ -419,9 +448,9 @@ function renderSenders() {
   const list = $('#senders-list'); clear(list); const q = $('#sender-search').value.trim().toLowerCase();
   const rows = state.senders.filter(row => {
     const tagText = (row.tags || []).join(' ');
-    const memText = (row.memories || []).map(m => `${m.topic} ${m.content}`).join(' ');
+    const memText = (row.memories || []).map(m => `${m.short_ref || ''} ${m.topic} ${m.content}`).join(' ');
     const kindText = row.is_group ? '群聊' : '';
-    return `${row.nickname} ${row.remark} ${row.sender_id} ${row.account_id} ${kindText} ${tagText} ${memText}`.toLowerCase().includes(q);
+    return `${row.short_ref || ''} ${row.nickname} ${row.remark} ${row.sender_id} ${row.account_id} ${kindText} ${tagText} ${memText}`.toLowerCase().includes(q);
   });
   $('#sender-count').textContent = `${rows.length} / ${state.senders.length}`;
   for (const row of rows) {
@@ -435,6 +464,11 @@ function renderSenders() {
     const titleNode = el('strong', '', titleLabel);
     titleNode.title = row.sender_id;
     heading.append(titleNode);
+    if (row.short_ref) {
+      const refNode = el('span', 'ref-tag', row.short_ref);
+      refNode.title = row.sender_id;
+      heading.append(refNode);
+    }
     const badges = el('div', 'chip-row');
     if (isGroup) badges.append(el('span', 'chip chip-group', '群聊'));
     if (!isGroup) {
@@ -544,6 +578,11 @@ function renderSenders() {
           const mRow = el('div', 'sub-item');
           const mMain = el('div', 'sub-item-main');
           const mHead = el('div', 'chip-row');
+          if (mem.short_ref) {
+            const memRef = el('span', 'ref-tag', mem.short_ref);
+            memRef.title = mem.memory_id || '';
+            mHead.append(memRef);
+          }
           mHead.append(el('span', 'chip chip-muted', mem.topic), el('span', 'event-time', shortTime(mem.updated_at)));
           mMain.append(mHead, el('div', 'sub-item-text', mem.content));
           const delBtn = confirmButton('删除', async () => {
@@ -602,18 +641,21 @@ async function loadSenders() {
     const data = await api('/api/senders');
     state.senders = data.senders || [];
     const discovered = {};
+    const discoveredRefs = {};
     for (const row of state.senders) {
       const label = formatDisplayLabel(row.remark, row.nickname);
       if (label) discovered[row.sender_id] = label;
+      if (row.short_ref) discoveredRefs[row.sender_id] = row.short_ref;
     }
     mergeNames(discovered);
+    mergeShortRefs(discoveredRefs);
     renderSenders();
   } catch (error) {
     toast(`联系人加载失败：${error.message}`);
   }
 }
 
-window.EchoLoomUI = {$, el, clear, api, mutate, toast, shortTime, displayName, chatTitle, mergeNames, details, confirmButton, state};
+window.EchoLoomUI = {$, el, clear, api, mutate, toast, shortTime, displayName, shortRef, chatTitle, mergeNames, mergeShortRefs, details, confirmButton, state};
 
 document.querySelectorAll('.nav').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
 $('#refresh').addEventListener('click', async () => {

@@ -429,3 +429,152 @@ def test_episode_semantic_text_strips_group_prefix_and_uses_vision_summary() -> 
     assert EpisodeMemory._semantic_text(img_turn, include_media_notes=True) == "一张厦门海边日落照片"
     short_turn = ContextTurn("wxid_abc", "hook_group_member_wxid", "wxid_abc:\n乐", message_id="m2")
     assert EpisodeMemory._semantic_text(short_turn, include_media_notes=True) == "乐"
+
+
+def test_short_refs_render_across_context_views_and_preserve_masking() -> None:
+    from echoloom.context import ContextTurn, ContextWindow
+
+    short_refs = {
+        ("chat", "room@chatroom"): "G1",
+        ("chat", "other@chatroom"): "G2",
+        ("user", "wxid_owner"): "U1",
+        ("user", "wxid_stranger"): "U2",
+        ("message", "msg_uuid_1"): "M42",
+        ("message", "msg_uuid_2"): "M43",
+        ("message", "msg_uuid_other"): "M44",
+        ("note", "note_uuid_1"): "N3",
+        ("image", "img_quick_1"): "I1",
+        ("image", "img_turn_1"): "I2",
+        ("audio", "aud_turn_1"): "A1",
+        ("file", "file_turn_1"): "F1",
+    }
+    identities = {
+        "room@chatroom": ContactIdentity("主群", user_name="room@chatroom", nickname="主群"),
+        "other@chatroom": ContactIdentity("隔壁群", user_name="other@chatroom", nickname="隔壁群"),
+        "wxid_owner": ContactIdentity(
+            "主人（OwnerNick）", user_name="wxid_owner", nickname="OwnerNick", remark="主人",
+        ),
+        "wxid_stranger": ContactIdentity(
+            "冒牌老婆", user_name="wxid_stranger", nickname="冒牌老婆",
+        ),
+    }
+    window = build_hook_context(
+        (
+            observed("wxid_owner", "发了图片和文件"),
+            observed("wxid_stranger", "我也说一句"),
+        ),
+        identities=identities,
+        short_refs=short_refs,
+        stored=(
+            {
+                "message_id": "msg_uuid_1",
+                "annotations": ({"note_id": "note_uuid_1", "content": "重要附件"},),
+                "image": {"image_id": "img_turn_1", "state": "ready"},
+                "audio": {"audio_id": "aud_turn_1", "state": "ready"},
+                "file": {
+                    "file_id": "file_turn_1",
+                    "state": "ready",
+                    "filename": "report.pdf",
+                    "byte_count": 1024,
+                },
+            },
+            {
+                "message_id": "msg_uuid_2",
+                "sender_memories": (
+                    {"sender_id": "wxid_stranger", "topic": "背景", "content": "普通路人"},
+                ),
+            },
+        ),
+        recent_other_messages=(
+            {
+                "message_id": "msg_uuid_other",
+                "conversation_id": "other@chatroom",
+                "sender_id": "wxid_owner",
+                "body_text": "隔壁群消息",
+                "direction": "inbound",
+            },
+        ),
+        priority_sender_references=(
+            {
+                "sender_id": "wxid_owner",
+                "tags": ("唯一主人",),
+                "same_chat_gap_minutes": 30,
+            },
+        ),
+        quick_send_images=(
+            {"image_id": "img_quick_1", "library_prompt": "猫猫挥手"},
+        ),
+    )
+
+    session = window.model_session_context()
+    refs = window.model_reference_context()
+    user = window.model_user_content()
+    cross = window.model_cross_chat_context()
+
+    assert "会话 ID：G1。" in session
+    assert "room@chatroom" not in session
+
+    assert "U1 → 主人（OwnerNick）" in refs
+    assert "U2 → 联系人-" in refs
+    assert "G2 → （隔壁群）" in refs
+    assert "U1 | 主人（OwnerNick）：标签：唯一主人" in refs
+    assert "U1 近期动态：距上次在本会话发言已隔 30 分钟" in refs
+    assert "U2 | 联系人-" in refs
+    assert "I1：猫猫挥手" in refs
+    assert "冒牌老婆" not in refs
+
+    assert "消息ID：M42" in user
+    assert "消息ID：M43" in user
+    assert "备注（N3）：重要附件" in user
+    assert "图片：I2（状态：ready）" in user
+    assert "语音：A1（状态：ready）" in user
+    assert "文件：F1 report.pdf（状态：ready，大小：1024 B）" in user
+    assert "主人（OwnerNick）：*{发了图片和文件}*" in user
+    assert "冒牌老婆" not in user
+
+    assert "讨论串「隔壁群」（群聊；ID：G2）：" in cross
+    assert "消息ID：M44" in cross
+
+    idle_window = ContextWindow(
+        account_id="bot",
+        conversation_id="idle-event:1",
+        is_group=False,
+        turns=(ContextTurn("系统空闲调度器", "idle_task", "整理记忆", message_id="idle:1"),),
+        global_timeline_turns=(
+            ContextTurn(
+                "wxid_owner", "idle_history", "全局消息",
+                message_id="msg_uuid_other", source_conversation_id="other@chatroom",
+                source_is_group=True,
+            ),
+        ),
+        is_idle_event=True,
+        identities=identities,
+        short_refs=short_refs,
+    )
+    idle_text = idle_window.model_user_content()
+    assert "聊天「隔壁群」（G2）：" in idle_text
+    assert "消息ID：M44" in idle_text
+
+
+def test_short_refs_empty_falls_back_to_raw_ids() -> None:
+    window = build_hook_context(
+        (observed("wxid_u", "原始内容"),),
+        stored=(
+            {
+                "message_id": "raw_msg_id",
+                "annotations": ({"note_id": "raw_note_id", "content": "批注"},),
+                "image": {"image_id": "raw_img_id", "state": "ready"},
+                "audio": {"audio_id": "raw_aud_id", "state": "ready"},
+                "file": {"file_id": "raw_file_id", "state": "ready", "filename": "a.txt"},
+            },
+        ),
+        quick_send_images=({"image_id": "raw_quick_img", "library_prompt": "表情"},),
+    )
+    assert "会话 ID：room@chatroom。" in window.model_session_context()
+    assert "raw_quick_img：表情" in window.model_reference_context()
+    user = window.model_user_content()
+    assert "消息ID：raw_msg_id" in user
+    assert "备注（raw_note_id）：批注" in user
+    assert "图片：raw_img_id（状态：ready）" in user
+    assert "语音：raw_aud_id（状态：ready）" in user
+    assert "文件：raw_file_id a.txt（状态：ready）" in user

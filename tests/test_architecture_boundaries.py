@@ -79,6 +79,7 @@ MODULE_LAYERS: dict[str, int] = {
     "repos.media_repo": 2,
     "repos.message_repo": 2,
     "repos.schema": 2,
+    "repos.short_ref_repo": 2,
     "runtime_scope": 2,
     "storage": 2,
     "time_scheduler": 2,

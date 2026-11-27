@@ -746,3 +746,282 @@ def test_all_sender_remarks_and_chatroom_conversation_remark(tmp_path):
         }
     finally:
         store.close()
+
+
+def test_short_refs_immutable_monotonic_eager_writes_and_resolve(tmp_path):
+    from echoloom.memory_store import SHORT_REF_PREFIXES, identity_ref_kind
+
+    assert SHORT_REF_PREFIXES == {
+        "message": "M",
+        "user": "U",
+        "chat": "G",
+        "event": "E",
+        "note": "N",
+        "entity": "D",
+        "memory": "P",
+        "image": "I",
+        "file": "F",
+        "audio": "A",
+    }
+    assert identity_ref_kind("wxid_alice") == "user"
+    assert identity_ref_kind("123@chatroom") == "chat"
+
+    store = MemoryStore(tmp_path / "short-refs.sqlite3")
+    try:
+        # Eager assignment on message + identity writes
+        m1 = store.archive_message(
+            account_id="wxid_bot",
+            conversation_id="room@chatroom",
+            sender_id="wxid_alice",
+            raw_envelope={"msg": "first"},
+            body_text="first",
+        )
+        m2 = store.archive_agent_message(
+            account_id="wxid_bot",
+            conversation_id="wxid_bob",
+            text="second",
+            operation_id="op-short-ref-1",
+            delivery_state="queued",
+            note="outbound note",
+        )
+        note_id = store.add_note(
+            account_id="wxid_bot", message_id=m1.message_id, content="重点备忘"
+        )
+        entity_id = store.upsert_entity(
+            account_id="wxid_bot", term="EchoLoom", explanation="项目名"
+        )
+        memory_id, created = store.upsert_sender_memory(
+            account_id="wxid_bot", sender_id="wxid_alice", topic="爱好", content="喜欢猫"
+        )
+        assert created is True
+        img = store.begin_image_ingest(
+            account_id="wxid_bot",
+            conversation_id="room@chatroom",
+            message_id=m1.message_id,
+            original_references=[],
+        )
+        aud = store.begin_audio_ingest(
+            account_id="wxid_bot",
+            conversation_id="room@chatroom",
+            message_id=m1.message_id,
+            duration_ms=1000,
+        )
+        fil = store.begin_file_ingest(
+            account_id="wxid_bot",
+            conversation_id="room@chatroom",
+            message_id=m1.message_id,
+            original_references=[],
+            filename="doc.txt",
+            fileext="txt",
+        )
+
+        refs = store.short_refs_map(
+            account_id="wxid_bot",
+            items=[
+                ("message", m1.message_id),
+                ("message", m2.message_id),
+                ("user", "wxid_alice"),
+                ("user", "wxid_bot"),
+                ("user", "wxid_bob"),
+                ("chat", "room@chatroom"),
+                ("note", note_id),
+                ("entity", entity_id),
+                ("memory", memory_id),
+                ("image", str(img["image_id"])),
+                ("audio", str(aud["audio_id"])),
+                ("file", str(fil["file_id"])),
+            ],
+        )
+        assert refs[("message", m1.message_id)] == "M1"
+        assert refs[("message", m2.message_id)] == "M2"
+        assert refs[("user", "wxid_alice")] == "U1"
+        assert refs[("chat", "room@chatroom")] == "G1"
+        assert refs[("user", "wxid_bot")] == "U2"
+        assert refs[("user", "wxid_bob")] == "U3"
+        assert refs[("note", note_id)] == "N2"  # N1 was archive_agent_message's note
+        assert refs[("entity", entity_id)] == "D1"
+        assert refs[("memory", memory_id)] == "P1"
+        assert refs[("image", str(img["image_id"]))] == "I1"
+        assert refs[("audio", str(aud["audio_id"]))] == "A1"
+        assert refs[("file", str(fil["file_id"]))] == "F1"
+
+        # Immutable re-ensure returns the exact same ref without advancing counter
+        assert (
+            store.ensure_short_ref(
+                account_id="wxid_bot", kind="message", target_id=m1.message_id
+            )
+            == "M1"
+        )
+        # Monotonic even if a record is soft-deleted
+        store.delete_entity(account_id="wxid_bot", entity_id=entity_id)
+        entity_id2 = store.upsert_entity(
+            account_id="wxid_bot", term="EchoLoom", explanation="新版解释"
+        )
+        assert (
+            store.short_refs_map(account_id="wxid_bot", items=[("entity", entity_id2)])[
+                ("entity", entity_id2)
+            ]
+            == "D2"
+        )
+
+        # Atomic rollback on aborted transaction leaves no short_ref leaked
+        with pytest.raises(RuntimeError, match="abort-short-ref"), store.transaction():
+            store.ensure_short_ref(
+                account_id="wxid_bot", kind="user", target_id="wxid_rolled_back"
+            )
+            raise RuntimeError("abort-short-ref")
+        assert (
+            store.short_refs_map(
+                account_id="wxid_bot", items=[("user", "wxid_rolled_back")]
+            )
+            == {}
+        )
+        # Counter was also rolled back so next user gets U4
+        assert (
+            store.ensure_short_ref(account_id="wxid_bot", kind="user", target_id="wxid_carol")
+            == "U4"
+        )
+
+        # resolve_short_ref: case-insensitive, kind-filtered, unknown -> None, raw passthrough
+        assert (
+            store.resolve_short_ref(account_id="wxid_bot", value="m1") == m1.message_id
+        )
+        assert (
+            store.resolve_short_ref(account_id="wxid_bot", value="  g1  ", kinds=("chat",))
+            == "room@chatroom"
+        )
+        assert (
+            store.resolve_short_ref(account_id="wxid_bot", value="M1", kinds=("user",))
+            is None
+        )
+        assert store.resolve_short_ref(account_id="wxid_bot", value="M999") is None
+        assert (
+            store.resolve_short_ref(account_id="other_bot", value="M1") is None
+        )
+        assert (
+            store.resolve_short_ref(account_id="wxid_bot", value=" wxid_alice ")
+            == "wxid_alice"
+        )
+        assert (
+            store.resolve_short_ref(account_id="wxid_bot", value="room@chatroom")
+            == "room@chatroom"
+        )
+        assert store.resolve_short_ref(account_id="wxid_bot", value="M0") == "M0"
+        assert store.resolve_short_ref(account_id="wxid_bot", value="X1") == "X1"
+
+        # Strictly read-only short_refs_map and resolve_short_ref under PRAGMA query_only=ON
+        store.db.execute("PRAGMA query_only=ON")
+        try:
+            ro_map = store.short_refs_map(
+                account_id="wxid_bot",
+                items=[("message", m1.message_id), ("message", "missing_id")],
+            )
+            assert ro_map == {("message", m1.message_id): "M1"}
+            assert (
+                store.resolve_short_ref(account_id="wxid_bot", value="m2", kinds=("message",))
+                == m2.message_id
+            )
+        finally:
+            store.db.execute("PRAGMA query_only=OFF")
+    finally:
+        store.close()
+
+
+def test_short_refs_idempotent_backfill_on_legacy_db(tmp_path):
+    db_path = tmp_path / "legacy-short-refs.sqlite3"
+    # Create a DB, insert rows directly bypassing short_refs, then reopen to trigger backfill
+    store = MemoryStore(db_path)
+    with store.transaction():
+        store.db.execute("DELETE FROM short_refs")
+        store.db.execute("DELETE FROM short_ref_counters")
+        store.db.execute(
+            "INSERT INTO source_messages("
+            "message_id,account_id,conversation_id,sender_id,captured_at,raw_json,"
+            "raw_sha256,body_text,expires_at,direction) VALUES "
+            "('msg_late','bot','room@chatroom','wxid_b','2026-10-29T10:05:00+00:00','{}','h2','b','2099-01-01','inbound'),"
+            "('msg_early','bot','room@chatroom','wxid_a','2026-10-29T10:00:00+00:00','{}','h1','a','2099-01-01','inbound')"
+        )
+        store.db.execute(
+            "INSERT INTO annotations VALUES "
+            "('note_1','bot','msg_early','agent','agent','untrusted_annotation','c','agent_observation',1,'active','2026-10-29T10:01:00+00:00','2026-10-29T10:01:00+00:00')"
+        )
+        store.db.execute(
+            "INSERT INTO entity_terms VALUES "
+            "('ent_1','bot','Term','Exp','agent','untrusted_dictionary',1,'active','2026-10-29T10:01:00+00:00','2026-10-29T10:01:00+00:00')"
+        )
+        store.db.execute(
+            "INSERT INTO sender_memories VALUES "
+            "('mem_1','bot','wxid_a','topic','content','untrusted_reference_data','active','2026-10-29T10:01:00+00:00','2026-10-29T10:01:00+00:00')"
+        )
+        store.db.execute(
+            "INSERT INTO sender_profiles VALUES "
+            "('bot','wxid_profile','备注',1,'active','human','2026-10-29T10:02:00+00:00')"
+        )
+        store.db.execute(
+            "INSERT INTO contact_directory VALUES "
+            "('bot','wxid_dir','目录昵称','','hook','2026-10-29T10:03:00+00:00')"
+        )
+        store.db.execute(
+            "INSERT INTO message_media(image_id,account_id,conversation_id,message_id,"
+            "original_references_json,state,created_at,updated_at) VALUES "
+            "('img_1','bot','room@chatroom','msg_early','[]','pending','2026-10-29T10:01:00+00:00','2026-10-29T10:01:00+00:00')"
+        )
+        store.db.execute(
+            "INSERT INTO message_audio(audio_id,account_id,conversation_id,message_id,"
+            "state,created_at,updated_at) VALUES "
+            "('aud_1','bot','room@chatroom','msg_early','pending','2026-10-29T10:01:00+00:00','2026-10-29T10:01:00+00:00')"
+        )
+        store.db.execute(
+            "INSERT INTO message_files(file_id,account_id,conversation_id,message_id,"
+            "filename,state,created_at,updated_at) VALUES "
+            "('fil_1','bot','room@chatroom','msg_early','f.txt','pending','2026-10-29T10:01:00+00:00','2026-10-29T10:01:00+00:00')"
+        )
+    store.close()
+
+    reopened = MemoryStore(db_path)
+    try:
+        mapped = reopened.short_refs_map(
+            account_id="bot",
+            items=[
+                ("message", "msg_early"),
+                ("message", "msg_late"),
+                ("chat", "room@chatroom"),
+                ("user", "wxid_a"),
+                ("user", "wxid_b"),
+                ("user", "wxid_profile"),
+                ("user", "wxid_dir"),
+                ("note", "note_1"),
+                ("entity", "ent_1"),
+                ("memory", "mem_1"),
+                ("image", "img_1"),
+                ("audio", "aud_1"),
+                ("file", "fil_1"),
+            ],
+        )
+        # Messages ordered by captured_at ASC, message_id ASC
+        assert mapped[("message", "msg_early")] == "M1"
+        assert mapped[("message", "msg_late")] == "M2"
+        assert mapped[("chat", "room@chatroom")] == "G1"
+        assert mapped[("user", "wxid_a")].startswith("U")
+        assert mapped[("user", "wxid_b")].startswith("U")
+        assert mapped[("user", "wxid_profile")].startswith("U")
+        assert mapped[("user", "wxid_dir")].startswith("U")
+        assert mapped[("note", "note_1")] == "N1"
+        assert mapped[("entity", "ent_1")] == "D1"
+        assert mapped[("memory", "mem_1")] == "P1"
+        assert mapped[("image", "img_1")] == "I1"
+        assert mapped[("audio", "aud_1")] == "A1"
+        assert mapped[("file", "fil_1")] == "F1"
+        snapshot_before = dict(mapped)
+    finally:
+        reopened.close()
+
+    # Reopening a second time is strictly idempotent (never renumbers)
+    reopened_again = MemoryStore(db_path)
+    try:
+        snapshot_after = reopened_again.short_refs_map(
+            account_id="bot", items=list(snapshot_before.keys())
+        )
+        assert snapshot_after == snapshot_before
+    finally:
+        reopened_again.close()

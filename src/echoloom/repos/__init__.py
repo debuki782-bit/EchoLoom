@@ -3,5 +3,14 @@
 from .knowledge_repo import KnowledgeRepo
 from .media_repo import MediaRepo
 from .message_repo import MessageRepo, StoredMessage
+from .short_ref_repo import SHORT_REF_PREFIXES, ShortRefRepo, identity_ref_kind
 
-__all__ = ["KnowledgeRepo", "MediaRepo", "MessageRepo", "StoredMessage"]
+__all__ = [
+    "SHORT_REF_PREFIXES",
+    "KnowledgeRepo",
+    "MediaRepo",
+    "MessageRepo",
+    "ShortRefRepo",
+    "StoredMessage",
+    "identity_ref_kind",
+]

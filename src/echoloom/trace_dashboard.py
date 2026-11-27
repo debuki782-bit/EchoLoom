@@ -21,7 +21,7 @@ from .dashboard_memory import (
     SENDER_BLOAT_THRESHOLD,
     register_memory_routes,
     require_local_mutation,
-    resolve_display_names,
+    resolve_display_names_and_refs,
     resolve_live_nicknames,
     sqlite_error_guard,
 )
@@ -276,20 +276,21 @@ def create_trace_dashboard(
             except sqlite3.Error:
                 store_for_names = None
         try:
-            names = await resolve_display_names(
+            names, short_refs = await resolve_display_names_and_refs(
                 store=store_for_names,
                 extra_ids=conv_ids,
                 contact_resolver=contact_resolver,
                 episode_db_path=resolved_episode_db,
             )
         except sqlite3.Error:
-            names = await resolve_display_names(
+            names, short_refs = await resolve_display_names_and_refs(
                 store=None,
                 extra_ids=conv_ids,
                 contact_resolver=contact_resolver,
             )
         return {"brand_name": brand_name,
-                "conversations": conversations, "names": names, "tools": tool_inventory(records),
+                "conversations": conversations, "names": names, "short_refs": short_refs,
+                "tools": tool_inventory(records),
                 "pilot": {key: status.get(key) for key in (
                     "mode", "trusted_gateway", "paused", "queue", "in_flight", "inbox_failures",
                     "tool_control_version"
@@ -389,6 +390,7 @@ def create_trace_dashboard(
             memories_by_pair: dict[tuple[str, str], list[dict[str, object]]] = {}
             tags_by_pair: dict[tuple[str, str], list[str]] = {}
             dir_by_account: dict[str, dict[str, dict[str, str]]] = {}
+            short_refs_by_account: dict[str, dict[tuple[str, str], str]] = {}
             for acct, sids in by_account.items():
                 mem_map = store.sender_memories(account_id=acct, sender_ids=sids)
                 for sid, entries in mem_map.items():
@@ -407,6 +409,17 @@ def create_trace_dashboard(
             for acct, ids in all_ids_by_account.items():
                 dir_by_account[acct] = store.contact_directory_map(
                     account_id=acct, contact_ids=ids
+                )
+                ref_items: list[tuple[str, str]] = [
+                    (store.identity_ref_kind(cid), cid) for cid in ids
+                ]
+                for sid in by_account.get(acct, ()):
+                    for mem in memories_by_pair.get((acct, sid), ()):
+                        mem_id = str(mem.get("memory_id") or "")
+                        if mem_id:
+                            ref_items.append(("memory", mem_id))
+                short_refs_by_account[acct] = store.short_refs_map(
+                    account_id=acct, items=ref_items
                 )
 
         combined_rows: list[tuple[bool, sqlite3.Row]] = [
@@ -444,11 +457,21 @@ def create_trace_dashboard(
                 dir_by_account.get(acct, {}).get(sid, {}).get("nickname") or ""
             ).strip()
             nickname = live_nicknames.get(sid, "") or cached_nick
-            memories = [] if is_group else memories_by_pair.get((acct, sid), [])
+            acct_refs = short_refs_by_account.get(acct, {})
+            sender_kind = "chat" if is_group else store.identity_ref_kind(sid)
+            raw_memories = [] if is_group else memories_by_pair.get((acct, sid), [])
+            memories = [
+                {
+                    **mem,
+                    "short_ref": acct_refs.get(("memory", str(mem.get("memory_id") or "")), ""),
+                }
+                for mem in raw_memories
+            ]
             result.append(
                 {
                     "account_id": acct,
                     "sender_id": sid,
+                    "short_ref": acct_refs.get((sender_kind, sid), ""),
                     "is_group": is_group,
                     "nickname": nickname,
                     "remark": str(row["remark"]),

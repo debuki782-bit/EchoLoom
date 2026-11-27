@@ -6,11 +6,10 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from .contacts import ContactIdentity, is_contact_id, is_group_conversation, is_room_id
@@ -22,8 +21,6 @@ from .context import (
 )
 from .context_builder import ContextBuilder, ContextSpec
 from .cross_session_sql import (
-    ALLOWED_SQL_ACTIONS as _ALLOWED_SQL_ACTIONS,
-    TABLE_COLUMNS as _TABLE_COLUMNS,
     execute_scoped_readonly_sql,
     is_sql_scalar,
     parse_query_time,
@@ -99,18 +96,22 @@ class CrossSessionService:
         rows = self.store.list_conversations(account_id=account_id, limit=200)
         if query:
             needle = query.casefold()
+            resolved_query_id = self._resolve_ref(account_id, query, ("chat", "user"))
             candidates = []
             for row in rows[:30]:
                 conversation_id = str(row["conversation_id"])
                 identity = self._resolve(conversation_id)
                 label = _safe_identity_name(conversation_id, identity, trusted_ids)
-                if any(
-                    needle in str(value).casefold()
-                    for value in (
-                        conversation_id,
-                        row["last_message_preview"],
-                        row["last_sender_id"],
-                        label,
+                if (
+                    (resolved_query_id and resolved_query_id == conversation_id)
+                    or any(
+                        needle in str(value).casefold()
+                        for value in (
+                            conversation_id,
+                            row["last_message_preview"],
+                            row["last_sender_id"],
+                            label,
+                        )
                     )
                 ):
                     candidates.append(row)
@@ -129,14 +130,26 @@ class CrossSessionService:
                     }:
                         candidates.append(by_id[conversation])
             rows = candidates
-        results = []
-        for row in rows[:limit]:
+        selected_rows = rows[:limit]
+        ref_map = self._short_refs_map(
+            account_id,
+            [
+                (self._identity_ref_kind(str(row["conversation_id"])), str(row["conversation_id"]))
+                for row in selected_rows
+                if row.get("conversation_id")
+            ],
+        )
+        results: list[dict[str, object]] = []
+        for row in selected_rows:
             entry = dict(row)
             conversation_id = str(row["conversation_id"])
             identity = self._resolve(conversation_id) if len(results) < 10 else None
             entry["display_name"] = _safe_identity_name(
                 conversation_id, identity, trusted_ids
             )
+            short_ref = ref_map.get((self._identity_ref_kind(conversation_id), conversation_id))
+            if short_ref:
+                entry["short_ref"] = short_ref
             preview = entry.get("last_message_preview")
             if isinstance(preview, str):
                 entry["last_message_preview"] = render_message_body(preview)
@@ -172,9 +185,61 @@ class CrossSessionService:
         if sender_id and (len(sender_id) > 160 or "\0" in sender_id):
             raise ValueError("sender_id must be at most 160 characters")
 
+        if conversation_id:
+            raw_conv = conversation_id.strip()
+            resolved_conv = self._resolve_ref(account_id, raw_conv, ("chat", "user"))
+            if resolved_conv is None:
+                return {"status": "unavailable", "reason": "conversation_not_in_archive", "messages": []}
+            if self._known_conversation(account_id, resolved_conv):
+                conversation_id = resolved_conv
+            elif resolved_conv != raw_conv:
+                return {"status": "unavailable", "reason": "conversation_not_in_archive", "messages": []}
+            else:
+                matched_chats = self._match_known_identities_by_name(
+                    account_id, raw_conv, self._known_conversations(account_id),
+                )
+                if len(matched_chats) == 1:
+                    conversation_id = matched_chats[0]
+                elif len(matched_chats) > 1:
+                    return {
+                        "status": "ambiguous",
+                        "reason": "conversation_name_matches_multiple_chats",
+                        "candidates": self._build_name_candidates(
+                            account_id, matched_chats, "conversation_id",
+                        ),
+                        "messages": [],
+                    }
+                else:
+                    return {"status": "unavailable", "reason": "conversation_not_in_archive", "messages": []}
+
+        if sender_id:
+            raw_sender = sender_id.strip()
+            resolved_sender = self._resolve_ref(account_id, raw_sender, ("user",))
+            if resolved_sender is None:
+                return {"status": "unavailable", "reason": "sender_not_in_archive", "messages": []}
+            if self._known_sender(account_id, resolved_sender):
+                sender_id = resolved_sender
+            elif resolved_sender != raw_sender:
+                return {"status": "unavailable", "reason": "sender_not_in_archive", "messages": []}
+            else:
+                matched_senders = self._match_known_identities_by_name(
+                    account_id, raw_sender, self._known_senders(account_id),
+                )
+                if len(matched_senders) == 1:
+                    sender_id = matched_senders[0]
+                elif len(matched_senders) > 1:
+                    return {
+                        "status": "ambiguous",
+                        "reason": "sender_name_matches_multiple_people",
+                        "candidates": self._build_name_candidates(
+                            account_id, matched_senders, "sender_id",
+                        ),
+                        "messages": [],
+                    }
+                else:
+                    sender_id = raw_sender
+
         scope = conversation_id or (None if all_conversations else current_conversation_id)
-        if conversation_id and not self._known_conversation(account_id, conversation_id):
-            return {"status": "unavailable", "reason": "conversation_not_in_archive", "messages": []}
 
         target_id = ""
         matched_count = 0
@@ -186,7 +251,10 @@ class CrossSessionService:
         if message_id:
             if not isinstance(message_id, str) or len(message_id) > 160 or "\0" in message_id:
                 raise ValueError("message_id must be 1..160 characters")
-            params: list[object] = [account_id, now_text, message_id, message_id]
+            resolved_message_id = self._resolve_ref(account_id, message_id, ("message",))
+            if resolved_message_id is None:
+                return {"status": "unavailable", "reason": "message_not_found", "messages": []}
+            params: list[object] = [account_id, now_text, resolved_message_id, resolved_message_id]
             sql = (
                 "SELECT message_id,platform_message_id,account_id,conversation_id,sender_id,"
                 "captured_at,raw_json,body_text,direction,delivery_state,event_time_context_json "
@@ -310,11 +378,33 @@ class CrossSessionService:
         chat_ids = list(dict.fromkeys(str(row.get("conversation_id", "")) for row in enriched))[:20]
         sender_names = {identifier: self._resolve(identifier) for identifier in sender_ids}
         chat_names = {identifier: self._resolve(identifier) for identifier in chat_ids}
+        ref_lookup: list[tuple[str, str]] = []
         for row in enriched:
+            mid = str(row.get("message_id", ""))
+            sid = str(row.get("sender_id", ""))
+            cid = str(row.get("conversation_id", ""))
+            if mid:
+                ref_lookup.append(("message", mid))
+            if sid:
+                ref_lookup.append((self._identity_ref_kind(sid), sid))
+            if cid:
+                ref_lookup.append((self._identity_ref_kind(cid), cid))
+        row_refs = self._short_refs_map(account_id, ref_lookup)
+        for row in enriched:
+            mid = str(row.get("message_id", ""))
             sender = str(row.get("sender_id", ""))
             chat = str(row.get("conversation_id", ""))
             row["display_name"] = _safe_identity_name(sender, sender_names.get(sender), trusted_ids)
             row["conversation_name"] = _safe_identity_name(chat, chat_names.get(chat), trusted_ids)
+            msg_ref = row_refs.get(("message", mid))
+            if msg_ref:
+                row["short_ref"] = msg_ref
+            sender_ref = row_refs.get((self._identity_ref_kind(sender), sender))
+            if sender_ref:
+                row["sender_ref"] = sender_ref
+            conv_ref = row_refs.get((self._identity_ref_kind(chat), chat))
+            if conv_ref:
+                row["conversation_ref"] = conv_ref
 
         bounded = []
         for source in enriched:
@@ -363,7 +453,8 @@ class CrossSessionService:
                     was_truncated = True
                 if encoded_size() > budget:
                     keep = (
-                        "message_id", "conversation_id", "sender_id", "captured_at",
+                        "message_id", "short_ref", "conversation_id", "conversation_ref",
+                        "sender_id", "sender_ref", "captured_at",
                         "direction", "message_type", "display_name", "conversation_name",
                         "body_text",
                     )
@@ -496,6 +587,12 @@ class CrossSessionService:
     ) -> dict[str, object]:
         if self.dispatch_reply is None:
             return {"status": "unavailable", "reason": "session_dispatch_not_configured"}
+        resolved_target = self._resolve_ref(
+            account_id, target_conversation_id, ("chat", "user"),
+        )
+        if not resolved_target:
+            return {"status": "unavailable", "reason": "conversation_not_in_archive"}
+        target_conversation_id = resolved_target
         idle_source = source_conversation_id.startswith("idle-event:")
         if (
             not idle_source and not self._known_conversation(account_id, source_conversation_id)
@@ -700,6 +797,133 @@ class CrossSessionService:
                 "message": "30 分钟内该会话对交流频繁；本次仍已转交。",
             }
         return None
+
+    def _identity_ref_kind(self, identifier: str) -> str:
+        kind_fn = getattr(self.store, "identity_ref_kind", None)
+        if callable(kind_fn):
+            return str(kind_fn(identifier))
+        return "chat" if is_group_conversation(identifier) else "user"
+
+    def _resolve_ref(
+        self, account_id: str, value: str, kinds: tuple[str, ...]
+    ) -> str | None:
+        if not isinstance(value, str):
+            return None
+        resolver = getattr(self.store, "resolve_short_ref", None)
+        if not callable(resolver):
+            return value.strip()
+        resolved = resolver(account_id=account_id, value=value, kinds=kinds)
+        return str(resolved) if isinstance(resolved, str) else None
+
+    def _short_refs_map(
+        self, account_id: str, items: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], str]:
+        if not items:
+            return {}
+        mapper = getattr(self.store, "short_refs_map", None)
+        if not callable(mapper):
+            return {}
+        mapped = mapper(account_id=account_id, items=items)
+        return dict(mapped) if isinstance(mapped, dict) else {}
+
+    def _known_conversations(self, account_id: str) -> list[str]:
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT DISTINCT conversation_id FROM source_messages "
+                "WHERE account_id=? AND deleted_at IS NULL",
+                (account_id,),
+            ).fetchall()
+        return [
+            str(row[0])
+            for row in rows
+            if row[0] and not str(row[0]).startswith("idle-event:")
+        ]
+
+    def _known_senders(self, account_id: str) -> list[str]:
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT DISTINCT sender_id FROM source_messages "
+                "WHERE account_id=? AND deleted_at IS NULL",
+                (account_id,),
+            ).fetchall()
+        return [str(row[0]) for row in rows if row[0]]
+
+    def _known_sender(self, account_id: str, sender_id: str) -> bool:
+        if (
+            not isinstance(sender_id, str)
+            or not sender_id.strip()
+            or len(sender_id) > 256
+        ):
+            return False
+        with self._lock:
+            row = self.db.execute(
+                "SELECT 1 FROM source_messages WHERE account_id=? "
+                "AND sender_id=? AND deleted_at IS NULL LIMIT 1",
+                (account_id, sender_id),
+            ).fetchone()
+        return row is not None
+
+    def _match_known_identities_by_name(
+        self, account_id: str, name: str, known_ids: Sequence[str]
+    ) -> list[str]:
+        needle = name.strip().casefold()
+        if not needle or not known_ids:
+            return []
+        known_set = list(dict.fromkeys(known_ids))
+        remarks = self.store.all_sender_remarks(account_id=account_id)
+        directory = self.store.contact_directory_map(
+            account_id=account_id, contact_ids=known_set,
+        )
+        matched: list[str] = []
+        for ident in known_set:
+            labels: list[str] = []
+            remark = remarks.get(ident)
+            if isinstance(remark, str) and remark.strip():
+                labels.append(remark.strip())
+            entry = directory.get(ident)
+            if isinstance(entry, dict):
+                for key in ("nickname", "alias"):
+                    val = entry.get(key)
+                    if isinstance(val, str) and val.strip():
+                        labels.append(val.strip())
+            if any(label.casefold() == needle for label in labels):
+                matched.append(ident)
+        return sorted(matched)
+
+    def _build_name_candidates(
+        self, account_id: str, ids: Sequence[str], id_key: str
+    ) -> list[dict[str, object]]:
+        trusted_ids = self._trusted_name_ids(account_id)
+        remarks = self.store.sender_remarks(account_id=account_id, sender_ids=ids)
+        directory = self.store.contact_directory_map(
+            account_id=account_id, contact_ids=ids,
+        )
+        ref_map = self._short_refs_map(
+            account_id, [(self._identity_ref_kind(ident), ident) for ident in ids],
+        )
+        candidates: list[dict[str, object]] = []
+        for ident in ids:
+            resolved = self._resolve(ident)
+            remark = remarks.get(ident) or (resolved.remark if resolved else None)
+            dir_entry = directory.get(ident) or {}
+            nickname = dir_entry.get("nickname") or (resolved.nickname if resolved else None)
+            identity: ContactIdentity | None = resolved
+            if remark or nickname:
+                identity = ContactIdentity(
+                    display_name=remark or nickname or ident,
+                    user_name=ident,
+                    nickname=nickname or None,
+                    remark=remark or None,
+                )
+            item: dict[str, object] = {
+                id_key: ident,
+                "display_name": _safe_identity_name(ident, identity, trusted_ids),
+            }
+            short_ref = ref_map.get((self._identity_ref_kind(ident), ident))
+            if short_ref:
+                item["short_ref"] = short_ref
+            candidates.append(item)
+        return candidates
 
     def _known_conversation(self, account_id: str, conversation_id: str) -> bool:
         if (

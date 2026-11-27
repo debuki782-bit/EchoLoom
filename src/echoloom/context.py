@@ -122,6 +122,26 @@ def _identity_display_parts(user_id: str, identity: ContactIdentity | None,
     return user_id, ()
 
 
+def _ref(
+    short_refs: Mapping[tuple[str, str], str],
+    kind: str,
+    target_id: str | None,
+) -> str:
+    if not target_id:
+        return ""
+    return short_refs.get((kind, target_id), target_id)
+
+
+def _id_ref(
+    short_refs: Mapping[tuple[str, str], str],
+    identifier: str | None,
+) -> str:
+    if not identifier:
+        return ""
+    kind = "chat" if is_group_conversation(identifier) else "user"
+    return short_refs.get((kind, identifier), identifier)
+
+
 def _trusted_identity_ids(
     priority_sender_references: Sequence[Mapping[str, object]],
     account_id: str | None = None,
@@ -177,6 +197,7 @@ class ContextWindow:
     idle_activity_summaries: tuple[str, ...] = field(default=(), repr=False)
     is_idle_event: bool = field(default=False, repr=False)
     identities: Mapping[str, ContactIdentity] = field(default_factory=dict, repr=False)
+    short_refs: Mapping[tuple[str, str], str] = field(default_factory=dict, repr=False)
     priority_sender_references: tuple[Mapping[str, object], ...] = field(default=(), repr=False)
     quick_send_images: tuple[Mapping[str, object], ...] = field(default=(), repr=False)
     user_fact_keys: tuple[str, ...] = field(default=(), repr=False)
@@ -202,7 +223,8 @@ class ContextWindow:
             _trusted_identity_ids(self.priority_sender_references, self.account_id),
         )
         kind = "群聊" if self.is_group else "私聊"
-        return f"当前会话：{kind}「{_one_line(name)}」；会话 ID：{self.conversation_id}。"
+        conv_ref = _id_ref(self.short_refs, self.conversation_id)
+        return f"当前会话：{kind}「{_one_line(name)}」；会话 ID：{conv_ref}。"
 
     def model_reference_context(self) -> str:
         """Render current contact labels and dictionary matches for request-time injection."""
@@ -214,7 +236,7 @@ class ContextWindow:
             name, aliases = _identity_display_parts(user_id, identity, trusted_ids)
             if name and name != user_id:
                 alias_text = f"（{', '.join(aliases)}）" if aliases else ""
-                lines.append(f"{user_id} → {name}{alias_text}")
+                lines.append(f"{_id_ref(self.short_refs, user_id)} → {name}{alias_text}")
 
         latest_entities: dict[str, Mapping[str, object]] = {}
         latest_senders: dict[tuple[str, str], Mapping[str, object]] = {}
@@ -262,8 +284,9 @@ class ContextWindow:
                 if isinstance(item, Mapping) and _one_line(item.get("content"))
             ] if isinstance(memories, (list, tuple)) else []
             detail = "；".join(([f"标签：{tag_text}"] if tag_text else []) + descriptions)
+            sender_ref = _id_ref(self.short_refs, sender_id)
             if detail:
-                priority_sender_lines.append(f"{sender_id} | {name}：{detail}")
+                priority_sender_lines.append(f"{sender_ref} | {name}：{detail}")
             same_gap = profile.get("same_chat_gap_minutes")
             other_activity = profile.get("other_chat_activity")
             activity_parts: list[str] = []
@@ -285,7 +308,7 @@ class ContextWindow:
                 if other_items:
                     activity_parts.append("近期在其它会话发言：" + "、".join(other_items))
             if activity_parts:
-                priority_sender_lines.append(f"{sender_id} 近期动态：{'；'.join(activity_parts)}")
+                priority_sender_lines.append(f"{sender_ref} 近期动态：{'；'.join(activity_parts)}")
         if priority_sender_ids and not self.is_idle_event and self.turns:
             ctx_cfg = local_config.load_local_runtime_config().context
             templates = runtime_templates()
@@ -324,7 +347,7 @@ class ContextWindow:
                 continue
             sender_identity = self.identities.get(sender_id)
             primary, aliases = _identity_display_parts(sender_id, sender_identity, trusted_ids)
-            label = f"{sender_id} | {primary}"
+            label = f"{_id_ref(self.short_refs, sender_id)} | {primary}"
             if aliases:
                 label += f"（{', '.join(aliases)}）"
             source_chat = latest_sender_chats.get((sender_id, topic), "")
@@ -364,8 +387,9 @@ class ContextWindow:
                 image_id = _one_line(image.get("image_id"))
                 description = _one_line(image.get("library_prompt"))[:120]
                 if image_id:
+                    image_ref = _ref(self.short_refs, "image", image_id)
                     image_lines.append(
-                        f"{image_id}：{description}" if description else image_id
+                        f"{image_ref}：{description}" if description else image_ref
                     )
             if image_lines:
                 result += (
@@ -417,6 +441,7 @@ class ContextWindow:
                 turn, self.identities, is_group, target_chat,
                 self.priority_sender_references,
                 account_id=self.account_id,
+                short_refs=self.short_refs,
             )
             for turn in selected
         ]
@@ -456,13 +481,18 @@ class ContextWindow:
             kind = "群聊" if conversation_id.endswith("@chatroom") else "私聊"
             lines = [
                 "["
-                + _format_turn(turn, self.identities, kind == "群聊", self.conversation_id,
-                               self.priority_sender_references, account_id=self.account_id)
+                + _format_turn(
+                    turn, self.identities, kind == "群聊", self.conversation_id,
+                    self.priority_sender_references,
+                    account_id=self.account_id,
+                    short_refs=self.short_refs,
+                )
                 + "]"
                 for turn in turns
             ]
+            conv_ref = _id_ref(self.short_refs, conversation_id)
             sections.append(
-                f"讨论串「{name}」（{kind}；ID：{conversation_id}）：\n" + "\n".join(lines)
+                f"讨论串「{name}」（{kind}；ID：{conv_ref}）：\n" + "\n".join(lines)
             )
         return templates["cross_chat_context_intro"] + "\n\n".join(sections)
 
@@ -490,12 +520,14 @@ class ContextWindow:
                         "__idle_event__",
                         self.priority_sender_references,
                         account_id=self.account_id,
+                        short_refs=self.short_refs,
                     )
                     + "]"
                     for turn in turns
                 ]
+                conv_ref = _id_ref(self.short_refs, conversation_id)
                 sections.append(
-                    f"聊天「{_one_line(label)}」（{conversation_id}）：\n" + "\n".join(lines)
+                    f"聊天「{_one_line(label)}」（{conv_ref}）：\n" + "\n".join(lines)
                 )
             content = templates["idle_history_header"] + (
                 "\n\n".join(sections) if sections else templates["idle_empty_history"]
@@ -515,8 +547,12 @@ class ContextWindow:
                 content += f"\n【省略较早空闲活动 {self.omitted_idle_activity_count} 条】"
         elif self.turns:
             blocks = [
-                "[" + _format_turn(turn, self.identities, self.is_group, self.conversation_id,
-                                   self.priority_sender_references, account_id=self.account_id) + "]"
+                "[" + _format_turn(
+                    turn, self.identities, self.is_group, self.conversation_id,
+                    self.priority_sender_references,
+                    account_id=self.account_id,
+                    short_refs=self.short_refs,
+                ) + "]"
                 for turn in self.turns
             ]
             if self.cancelled_followup:
@@ -549,8 +585,12 @@ class ContextWindow:
     def model_history_records(self) -> list[str]:
         """Render prior messages individually so a caller can budget the window."""
         return [
-            "[" + _format_turn(turn, self.identities, self.is_group, self.conversation_id,
-                               self.priority_sender_references, account_id=self.account_id) + "]"
+            "[" + _format_turn(
+                turn, self.identities, self.is_group, self.conversation_id,
+                self.priority_sender_references,
+                account_id=self.account_id,
+                short_refs=self.short_refs,
+            ) + "]"
             for turn in self.history_turns
         ]
 
@@ -649,12 +689,14 @@ def _format_turn(
     priority_sender_references: Sequence[Mapping[str, object]] = (),
     quick_send_images: Sequence[Mapping[str, object]] = (),
     account_id: str | None = None,
+    short_refs: Mapping[tuple[str, str], str] | None = None,
 ) -> str:
+    refs = short_refs or {}
     is_group = turn.source_is_group if turn.source_is_group is not None else default_is_group
     trusted_ids = _trusted_identity_ids(priority_sender_references, account_id)
     first_line: list[str] = []
     if turn.message_id:
-        first_line.append(f"消息ID：{turn.message_id}")
+        first_line.append(f"消息ID：{_ref(refs, 'message', turn.message_id)}")
     if turn.message_time:
         timestamp = (
             turn.message_time.get("local_minute")
@@ -692,7 +734,7 @@ def _format_turn(
         if chat_name and chat_name != turn.source_conversation_id:
             first_line.append(f"来源聊天：{chat_name}")
         else:
-            first_line.append(f"来源聊天 ID：{turn.source_conversation_id}")
+            first_line.append(f"来源聊天 ID：{_id_ref(refs, turn.source_conversation_id)}")
     if turn.delivery_state:
         first_line.append(f"发送状态：{turn.delivery_state}")
     body, quote = _message_text(turn.text, turn, is_group, identities, trusted_ids)
@@ -727,7 +769,7 @@ def _format_turn(
         platform_id = str(turn.quote_target.get("platform_message_id", ""))
         rendered += f"\n引用的原消息（平台消息 ID 精确匹配 {platform_id}）：\n" + _format_turn(
             target, identities, default_is_group, current_conversation_id,
-            priority_sender_references, account_id=account_id,
+            priority_sender_references, account_id=account_id, short_refs=refs,
         )
     elif quote:
         rendered += (
@@ -738,13 +780,17 @@ def _format_turn(
         content = _one_line(note.get("content"))
         if content:
             note_id = note.get("note_id")
-            rendered += f"\n备注{f'（{note_id}）' if note_id else ''}：{content}"
+            note_ref = _ref(refs, "note", note_id) if isinstance(note_id, str) and note_id else ""
+            rendered += f"\n备注{f'（{note_ref}）' if note_ref else ''}：{content}"
     if turn.image_metadata:
         image_id = turn.image_metadata.get("image_id")
         state = turn.image_metadata.get("state")
         vision_summary = turn.image_metadata.get("vision_summary")
         if image_id or state:
-            rendered += f"\n图片：{image_id or '无可用图片 ID'}（状态：{state or '未知'}）"
+            image_ref = (
+                _ref(refs, "image", image_id) if isinstance(image_id, str) and image_id else ""
+            )
+            rendered += f"\n图片：{image_ref or '无可用图片 ID'}（状态：{state or '未知'}）"
         if turn.image_metadata.get("source_kind") == "thumbnail_inferred":
             rendered += "\n图片质量：低清缩略图；由时间和尺寸元数据推测关联，可能不是该消息的图片。"
         if vision_summary:
@@ -756,7 +802,10 @@ def _format_turn(
         audio_id = turn.audio_metadata.get("audio_id")
         state = turn.audio_metadata.get("state")
         if audio_id or state:
-            rendered += f"\n语音：{audio_id or '无可用语音 ID'}（状态：{state or '未知'}）"
+            audio_ref = (
+                _ref(refs, "audio", audio_id) if isinstance(audio_id, str) and audio_id else ""
+            )
+            rendered += f"\n语音：{audio_ref or '无可用语音 ID'}（状态：{state or '未知'}）"
         transcript = turn.audio_metadata.get("transcript")
         if transcript:
             rendered += f"\n语音转写：{_one_line(transcript)}"
@@ -766,9 +815,12 @@ def _format_turn(
         filename = turn.file_metadata.get("filename")
         byte_count = turn.file_metadata.get("byte_count") or turn.file_metadata.get("expected_bytes")
         if file_id or state:
+            file_ref = (
+                _ref(refs, "file", file_id) if isinstance(file_id, str) and file_id else ""
+            )
             size_part = f"，大小：{byte_count} B" if isinstance(byte_count, int) else ""
             name_part = f" {filename}" if filename else ""
-            rendered += f"\n文件：{file_id or '无可用文件 ID'}{name_part}（状态：{state or '未知'}{size_part}）"
+            rendered += f"\n文件：{file_ref or '无可用文件 ID'}{name_part}（状态：{state or '未知'}{size_part}）"
         summary = turn.file_metadata.get("summary")
         if summary:
             model_id = turn.file_metadata.get("summary_model_id")
@@ -780,6 +832,7 @@ def build_hook_context(
     observations: Sequence[MessageEvent],
     *,
     identities: Mapping[str, ContactIdentity] | None = None,
+    short_refs: Mapping[tuple[str, str], str] | None = None,
     stored: Sequence[Mapping[str, object]] | None = None,
     historical_messages: Sequence[Mapping[str, object]] = (),
     recent_other_messages: Sequence[Mapping[str, object]] = (),
@@ -813,6 +866,7 @@ def build_hook_context(
             _other_chat_turn(item) for item in _unique_messages(recent_other_messages)[-20:]
         ),
         identities=identities or {},
+        short_refs=short_refs or {},
         priority_sender_references=tuple(
             item for item in priority_sender_references if isinstance(item, Mapping)
         ),

@@ -304,3 +304,138 @@ def test_query_messages_supports_space_separated_keywords(tmp_path):
     assert res["matched_count"] == 1
     assert "内存" in res["messages"][0]["body_text"]
     store.close()
+
+
+def test_phase2_short_refs_name_disambiguation_dispatch_and_sql(tmp_path):
+    import asyncio
+
+    store = MemoryStore(tmp_path / "memory.sqlite3")
+    m_g1 = _archive(store, "bot", "room_alpha@chatroom", "wxid_alice", "周五开会讨论架构")
+    _archive(store, "bot", "room_alpha@chatroom", "wxid_bob", "收到架构议程")
+    _archive(store, "bot", "room_beta@chatroom", "wxid_charlie", "周末聚餐安排")
+    _archive(store, "bot", "wxid_dm_only", "wxid_dm_only", "私聊确认细节")
+
+    # Populate remarks + contact_directory for safe unique & ambiguous name resolution
+    store.set_human_sender_remark(account_id="bot", sender_id="room_alpha@chatroom", remark="研发群")
+    store.set_human_sender_remark(account_id="bot", sender_id="wxid_alice", remark="唯一阿丽")
+    store.upsert_contact_directory(account_id="bot", contact_id="room_alpha@chatroom", nickname="共享群名")
+    store.upsert_contact_directory(account_id="bot", contact_id="room_beta@chatroom", nickname="共享群名")
+    store.upsert_contact_directory(account_id="bot", contact_id="wxid_bob", nickname="重名小王")
+    store.upsert_contact_directory(account_id="bot", contact_id="wxid_charlie", nickname="重名小王")
+
+    refs = store.short_refs_map(
+        account_id="bot",
+        items=[
+            ("message", m_g1.message_id),
+            ("chat", "room_alpha@chatroom"),
+            ("chat", "room_beta@chatroom"),
+            ("user", "wxid_alice"),
+            ("user", "wxid_bob"),
+            ("user", "wxid_charlie"),
+            ("user", "wxid_dm_only"),
+        ],
+    )
+    m1_ref = refs[("message", m_g1.message_id)]
+    g1_ref = refs[("chat", "room_alpha@chatroom")]
+    u_alice = refs[("user", "wxid_alice")]
+    u_bob = refs[("user", "wxid_bob")]
+    u_charlie = refs[("user", "wxid_charlie")]
+    u_dm = refs[("user", "wxid_dm_only")]
+
+    dispatched_targets: list[str] = []
+
+    async def fake_dispatch(window, task_id):
+        dispatched_targets.append(window.conversation_id)
+        return "done"
+
+    service = CrossSessionService(store, dispatch_reply=fake_dispatch)
+    try:
+        # 1) list_conversations attaches short_ref and supports querying by G#
+        chats = service.list_conversations(account_id="bot", limit=10)
+        by_cid = {row["conversation_id"]: row for row in chats}
+        assert by_cid["room_alpha@chatroom"]["short_ref"] == g1_ref
+        assert by_cid["wxid_dm_only"]["short_ref"] == u_dm
+        by_short_query = service.list_conversations(account_id="bot", query=g1_ref.lower(), limit=10)
+        assert any(row["conversation_id"] == "room_alpha@chatroom" for row in by_short_query)
+
+        # 2) query_messages by M# (case-insensitive) and enriched short_ref/sender_ref/conversation_ref
+        by_msg_ref = service.query_messages(account_id="bot", message_id=m1_ref.lower(), before=0, after=0)
+        assert by_msg_ref["status"] == "completed"
+        row = by_msg_ref["messages"][0]
+        assert row["message_id"] == m_g1.message_id
+        assert row["short_ref"] == m1_ref
+        assert row["sender_ref"] == u_alice
+        assert row["conversation_ref"] == g1_ref
+        assert service.query_messages(account_id="bot", message_id="M999")["status"] == "unavailable"
+        assert service.query_messages(account_id="bot", message_id=u_alice)["status"] == "unavailable"
+
+        # 3) query_messages by G# / U# / unique name / ambiguous name for conversation_id
+        by_g_ref = service.query_messages(account_id="bot", conversation_id=g1_ref.lower())
+        assert by_g_ref["status"] == "completed" and by_g_ref["matched_count"] == 2
+        by_chat_name = service.query_messages(account_id="bot", conversation_id="研发群")
+        assert by_chat_name["status"] == "completed" and by_chat_name["scope"] == "room_alpha@chatroom"
+        amb_chat = service.query_messages(account_id="bot", conversation_id="共享群名")
+        assert amb_chat["status"] == "ambiguous"
+        assert amb_chat["reason"] == "conversation_name_matches_multiple_chats"
+        assert {c["conversation_id"] for c in amb_chat["candidates"]} == {
+            "room_alpha@chatroom", "room_beta@chatroom",
+        }
+        assert all(c.get("short_ref") for c in amb_chat["candidates"])
+        assert service.query_messages(account_id="bot", conversation_id="G999")["status"] == "unavailable"
+
+        # 4) query_messages by U# / unique name / ambiguous name for sender_id
+        by_u_ref = service.query_messages(
+            account_id="bot", all_conversations=True, sender_id=u_alice.lower(),
+        )
+        assert by_u_ref["status"] == "completed" and by_u_ref["matched_count"] == 1
+        assert by_u_ref["messages"][0]["sender_id"] == "wxid_alice"
+        by_sender_name = service.query_messages(
+            account_id="bot", all_conversations=True, sender_id="唯一阿丽",
+        )
+        assert by_sender_name["status"] == "completed" and by_sender_name["matched_count"] == 1
+        amb_sender = service.query_messages(
+            account_id="bot", all_conversations=True, sender_id="重名小王",
+        )
+        assert amb_sender["status"] == "ambiguous"
+        assert amb_sender["reason"] == "sender_name_matches_multiple_people"
+        assert {c["sender_id"] for c in amb_sender["candidates"]} == {"wxid_bob", "wxid_charlie"}
+        assert {c["short_ref"] for c in amb_sender["candidates"]} == {u_bob, u_charlie}
+        assert service.query_messages(
+            account_id="bot", all_conversations=True, sender_id="U999",
+        )["status"] == "unavailable"
+
+        # 5) dispatch resolves G# / U# target_conversation_id and rejects unknown G999
+        disp = asyncio.run(
+            service.dispatch(
+                account_id="bot",
+                source_conversation_id="wxid_dm_only",
+                target_conversation_id=g1_ref.lower(),
+                task="查看群内最新进度",
+            )
+        )
+        assert disp["status"] == "completed"
+        assert disp["target_conversation_id"] == "room_alpha@chatroom"
+        assert dispatched_targets == ["room_alpha@chatroom"]
+
+        bad_disp = asyncio.run(
+            service.dispatch(
+                account_id="bot",
+                source_conversation_id="wxid_dm_only",
+                target_conversation_id="G999",
+                task="无效目标",
+            )
+        )
+        assert bad_disp["status"] == "unavailable"
+
+        # 6) query_sql allows read-only SELECT on short_refs
+        sql_res = service.query_sql(
+            account_id="bot",
+            query="SELECT kind, short_ref, target_id FROM short_refs WHERE account_id=? AND short_ref=?",
+            parameters=(g1_ref,),
+        )
+        assert sql_res["status"] == "completed"
+        assert sql_res["rows"] == [
+            {"kind": "chat", "short_ref": g1_ref, "target_id": "room_alpha@chatroom"}
+        ]
+    finally:
+        store.close()

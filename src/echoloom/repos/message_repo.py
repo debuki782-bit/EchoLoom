@@ -10,9 +10,14 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from ..contacts import is_group_conversation
+from .short_ref_repo import identity_ref_kind
+
+if TYPE_CHECKING:
+    from .short_ref_repo import ShortRefRepo
 
 MAX_QUERY_CHARS = 300
 DEFAULT_RETENTION_DAYS = 365
@@ -56,11 +61,13 @@ class MessageRepo:
         transaction_fn: Callable[[], AbstractContextManager[None]],
         *,
         ensure_note: Callable[..., None] | None = None,
+        short_refs: ShortRefRepo | None = None,
     ) -> None:
         self.db = db
         self._lock = lock
         self._transaction = transaction_fn
         self._ensure_note = ensure_note
+        self._short_refs = short_refs
 
     def archive_message(
         self,
@@ -182,6 +189,13 @@ class MessageRepo:
                     delivery_state,
                 ),
             )
+            if self._short_refs is not None:
+                ref_items: list[tuple[str, str]] = [("message", message_id)]
+                if sender_id:
+                    ref_items.append((identity_ref_kind(sender_id), sender_id))
+                if conversation_id:
+                    ref_items.append((identity_ref_kind(conversation_id), conversation_id))
+                self._short_refs.ensure_short_refs_batch(account_id=account_id, items=ref_items)
         return StoredMessage(message_id, raw_hash, raw_json, captured_iso)
 
     def archive_agent_message(

@@ -9,6 +9,8 @@ import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 
+from .short_ref_repo import backfill_short_refs
+
 _SCHEMA_SCRIPT = """
 CREATE TABLE IF NOT EXISTS source_messages (
   message_id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
@@ -180,6 +182,23 @@ CREATE TABLE IF NOT EXISTS contact_directory (
   source TEXT NOT NULL DEFAULT 'hook',
   updated_at TEXT NOT NULL,
   PRIMARY KEY (account_id, contact_id)
+);
+CREATE TABLE IF NOT EXISTS short_refs (
+  account_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  short_ref TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (account_id, kind, target_id),
+  UNIQUE (account_id, short_ref)
+);
+CREATE INDEX IF NOT EXISTS short_refs_by_ref
+  ON short_refs(account_id, short_ref);
+CREATE TABLE IF NOT EXISTS short_ref_counters (
+  account_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  next_seq INTEGER NOT NULL,
+  PRIMARY KEY (account_id, kind)
 );
 """
 
@@ -353,3 +372,4 @@ def init_memory_schema(
     )
     db.commit()
     migrate_sender_memories_to_multi_entry(db, lock)
+    backfill_short_refs(db, transaction_fn)

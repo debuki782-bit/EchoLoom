@@ -19,6 +19,7 @@ from .contacts import (
 from .context import (
     ContextTurn,
     ContextWindow,
+    _id_ref,
     _other_chat_turn,
     _record_turn,
     _safe_identity_name,
@@ -676,15 +677,6 @@ class ContextBuilder:
             for index, item in enumerate(spec.observations)
         )
         turns = (*obs_turns, *spec.synthetic_turns)
-        if spec.mode == "idle" and idle_snapshot is not None:
-            trusted_ids = {spec.account_id, *priority_sender_ids}
-            delta_block = _format_idle_curation_snapshot(idle_snapshot, identities, trusted_ids)
-            turns = tuple(
-                replace(turn, text=f"{turn.text}\n\n{delta_block}")
-                if turn.sender_origin == "idle_task"
-                else turn
-                for turn in turns
-            )
 
         history_origin = (
             "cross_session_history" if spec.mode == "cross_session" else "stored_other_chat"
@@ -714,6 +706,34 @@ class ContextBuilder:
             else ()
         )
 
+        short_refs = await self._load_short_refs(
+            spec,
+            identities=identities,
+            priority_sender_ids=priority_sender_ids,
+            activity_chat_ids=activity_chat_ids,
+            delta_chat_ids=delta_chat_ids,
+            bloated_sender_ids=bloated_sender_ids,
+            quick_send_images=quick_send_images,
+            turns=(
+                *turns,
+                *history_turns,
+                *recent_other_turns,
+                *global_timeline_turns,
+            ),
+        )
+
+        if spec.mode == "idle" and idle_snapshot is not None:
+            trusted_ids = {spec.account_id, *priority_sender_ids}
+            delta_block = _format_idle_curation_snapshot(
+                idle_snapshot, identities, trusted_ids, short_refs=short_refs
+            )
+            turns = tuple(
+                replace(turn, text=f"{turn.text}\n\n{delta_block}")
+                if turn.sender_origin == "idle_task"
+                else turn
+                for turn in turns
+            )
+
         window = ContextWindow(
             account_id=spec.account_id,
             conversation_id=spec.conversation_id,
@@ -725,6 +745,7 @@ class ContextBuilder:
             idle_activity_summaries=idle_summaries,
             is_idle_event=(spec.mode == "idle"),
             identities=identities,
+            short_refs=short_refs,
             priority_sender_references=tuple(
                 item for item in priority_sender_references if isinstance(item, Mapping)
             ),
@@ -903,6 +924,124 @@ class ContextBuilder:
             identities = apply_sender_remarks(identities, remarks)
         return identities
 
+    async def _load_short_refs(
+        self,
+        spec: ContextSpec,
+        *,
+        identities: Mapping[str, ContactIdentity],
+        priority_sender_ids: Sequence[str],
+        activity_chat_ids: Sequence[str],
+        delta_chat_ids: Sequence[str],
+        bloated_sender_ids: Sequence[str],
+        quick_send_images: Sequence[Mapping[str, object]],
+        turns: Sequence[ContextTurn],
+    ) -> dict[tuple[str, str], str]:
+        if self.memory_store is None:
+            return {}
+        ref_items: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _add(kind: str, raw: object) -> None:
+            if not isinstance(raw, str):
+                return
+            val = raw.strip()
+            if not val or len(val) > 256 or "\0" in val:
+                return
+            key = (kind, val)
+            if key not in seen:
+                seen.add(key)
+                ref_items.append(key)
+
+        def _add_identity(raw: object) -> None:
+            if not isinstance(raw, str):
+                return
+            val = raw.strip()
+            if (
+                not val
+                or len(val) > 256
+                or "\0" in val
+                or val.startswith(("idle-event:", "Agent内部", "系统空闲"))
+            ):
+                return
+            kind = "chat" if is_group_conversation(val) else "user"
+            _add(kind, val)
+
+        _add_identity(spec.account_id)
+        _add_identity(spec.conversation_id)
+        for uid in (
+            *identities.keys(),
+            *priority_sender_ids,
+            *activity_chat_ids,
+            *delta_chat_ids,
+            *bloated_sender_ids,
+        ):
+            _add_identity(uid)
+
+        for img in quick_send_images:
+            _add("image", img.get("image_id"))
+
+        def _add_quote_target(qt: Mapping[str, object]) -> None:
+            _add("message", qt.get("message_id"))
+            _add_identity(qt.get("sender_id"))
+            _add_identity(qt.get("source_conversation_id") or qt.get("conversation_id"))
+            qt_notes = qt.get("annotations")
+            if isinstance(qt_notes, (list, tuple)):
+                for note in qt_notes:
+                    if isinstance(note, Mapping):
+                        _add("note", note.get("note_id"))
+            qt_img = qt.get("image")
+            if isinstance(qt_img, Mapping):
+                _add("image", qt_img.get("image_id"))
+            qt_aud = qt.get("audio")
+            if isinstance(qt_aud, Mapping):
+                _add("audio", qt_aud.get("audio_id"))
+            qt_file = qt.get("file")
+            if isinstance(qt_file, Mapping):
+                _add("file", qt_file.get("file_id"))
+
+        for turn in turns:
+            _add_identity(turn.sender_id)
+            _add_identity(turn.source_conversation_id)
+            if turn.sender_origin not in ("idle_task", "cross_session_task"):
+                _add("message", turn.message_id)
+            for note in turn.annotations:
+                _add("note", note.get("note_id"))
+            if turn.image_metadata is not None:
+                _add("image", turn.image_metadata.get("image_id"))
+            if turn.audio_metadata is not None:
+                _add("audio", turn.audio_metadata.get("audio_id"))
+            if turn.file_metadata is not None:
+                _add("file", turn.file_metadata.get("file_id"))
+            if turn.quote_target is not None:
+                _add_quote_target(turn.quote_target)
+
+        if not ref_items:
+            return {}
+        try:
+            short_refs = await run_db(
+                self.memory_store.short_refs_map,
+                account_id=spec.account_id,
+                items=ref_items,
+                db=self.memory_store.db,
+                lock=self.memory_store._lock,
+            )
+        except (sqlite3.Error, AttributeError):
+            short_refs = {}
+        missing = [item for item in ref_items if item not in short_refs]
+        if missing:
+            try:
+                created = await run_db(
+                    self.memory_store.ensure_short_refs_batch,
+                    account_id=spec.account_id,
+                    items=missing,
+                    db=self.memory_store.db,
+                    lock=self.memory_store._lock,
+                )
+                short_refs.update(created)
+            except (sqlite3.Error, AttributeError):
+                pass
+        return short_refs
+
 
 def _format_local_minute(iso_stamp: object) -> str:
     if not isinstance(iso_stamp, str) or not iso_stamp:
@@ -937,8 +1076,10 @@ def _format_idle_curation_snapshot(
     snapshot: Mapping[str, object],
     identities: Mapping[str, ContactIdentity],
     trusted_ids: set[str],
+    short_refs: Mapping[tuple[str, str], str] | None = None,
 ) -> str:
     """Format an objective per-idle delta and memory inventory block."""
+    refs = short_refs or {}
     since_label = _format_local_minute(snapshot.get("since_at"))
     new_count = _int_value(snapshot.get("new_human_messages"))
     unannotated = _int_value(snapshot.get("unannotated_new_messages"))
@@ -966,7 +1107,7 @@ def _format_idle_curation_snapshot(
         label = _safe_identity_name(cid, identities.get(cid), trusted_ids)
         kind = "群聊" if is_group_conversation(cid) else "私聊"
         latest = _format_local_minute(item.get("latest_at"))
-        chat_parts.append(f"{kind}「{label}」({cid}) {cnt} 条 [最新 {latest}]")
+        chat_parts.append(f"{kind}「{label}」({_id_ref(refs, cid)}) {cnt} 条 [最新 {latest}]")
 
     bloat_parts: list[str] = []
     if bloated_senders:
@@ -977,7 +1118,7 @@ def _format_idle_curation_snapshot(
             if not sid or cnt <= 0:
                 continue
             label = _safe_identity_name(sid, identities.get(sid), trusted_ids)
-            sender_labels.append(f"{label}({sid}) {cnt} 条")
+            sender_labels.append(f"{label}({_id_ref(refs, sid)}) {cnt} 条")
         if sender_labels:
             bloat_parts.append("人物资料碎片≥8条：" + "、".join(sender_labels))
     if excess_fact_keys:

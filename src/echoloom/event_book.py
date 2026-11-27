@@ -34,6 +34,7 @@ class EventBook:
             "action TEXT NOT NULL,priority TEXT NOT NULL,content TEXT NOT NULL,"
             "exit_condition TEXT NOT NULL,expires_at TEXT,created_at TEXT NOT NULL);"
         )
+        self.store.short_refs.backfill_event_book()
 
     def _record_revision(self, account_id: str, event_id: str, action: str,
                          priority: str, content: str, exit_condition: str,
@@ -73,7 +74,15 @@ class EventBook:
             "ORDER BY CASE priority WHEN 'high' THEN 0 ELSE 1 END,updated_at DESC,event_id",
             (account_id,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        entries = [dict(row) for row in rows]
+        if entries:
+            refs = self.store.short_refs_map(
+                account_id=account_id,
+                items=[("event", str(entry["event_id"])) for entry in entries],
+            )
+            for entry in entries:
+                entry["short_ref"] = refs.get(("event", str(entry["event_id"])), "")
+        return entries
 
     def render(self, account_id: str) -> str:
         entries = self.list_entries(account_id)
@@ -83,7 +92,8 @@ class EventBook:
         lines = ["【账号级事件簿｜跨全部会话动态快照】"]
         lines.append("高优事件（最多 4 条，每条最多 200 字）：")
         lines.extend(
-            f"- [{row['event_id']}] {row['content']}（退出条件：{row['exit_condition']}）"
+            f"- [{row.get('short_ref') or row['event_id']}] {row['content']}"
+            f"（退出条件：{row['exit_condition']}）"
             for row in high
         )
         if not high:
@@ -93,8 +103,9 @@ class EventBook:
             updated_age = self._elapsed_label(row["updated_at"], now)
             stale = self._elapsed_seconds(row["updated_at"], now) >= 72 * 60 * 60
             freshness = "已过时，先复核并更新或删除" if stale else "未过时"
+            ref = row.get("short_ref") or row["event_id"]
             lines.append(
-                f"- [{row['event_id']}] {row['content']}（生成时间：{updated_age}前；{freshness}；"
+                f"- [{ref}] {row['content']}（生成时间：{updated_age}前；{freshness}；"
                 f"退出条件：{row['exit_condition']}；到期：{row['expires_at'] or '未设定'}）"
             )
         if not ordinary:
@@ -176,7 +187,15 @@ class EventBook:
             )
             self._record_revision(account_id, event_id, "add", priority, content,
                                   exit_condition, expires, now)
-        return {"status": "saved", "event_id": event_id, "priority": priority}
+            short_ref = self.store.ensure_short_ref(
+                account_id=account_id, kind="event", target_id=event_id
+            )
+        return {
+            "status": "saved",
+            "event_id": event_id,
+            "short_ref": short_ref,
+            "priority": priority,
+        }
 
     def update(
         self,
@@ -187,7 +206,12 @@ class EventBook:
         exit_condition: str | None = None,
         expires_at: str | None = None,
     ) -> dict[str, object]:
-        current = self._owned(account_id, event_id)
+        resolved_id = self.store.resolve_short_ref(
+            account_id=account_id, value=event_id, kinds=("event",)
+        )
+        if not resolved_id:
+            return {"status": "unavailable"}
+        current = self._owned(account_id, resolved_id)
         if current is None:
             return {"status": "unavailable"}
         next_content = (
@@ -216,7 +240,7 @@ class EventBook:
             used = self.db.execute(
                 "SELECT coalesce(sum(length(content)),0) FROM event_book WHERE account_id=? "
                 "AND priority='ordinary' AND state='active' AND event_id<>?",
-                (account_id, event_id),
+                (account_id, resolved_id),
             ).fetchone()[0]
             if used + len(next_content) > self.ORDINARY_TOTAL_CHARS:
                 return {"status": "full", "reason": "ordinary_character_budget_full"}
@@ -224,27 +248,38 @@ class EventBook:
             self.db.execute(
                 "UPDATE event_book SET content=?,exit_condition=?,expires_at=?,updated_at=? "
                 "WHERE event_id=? AND account_id=? AND state='active'",
-                (next_content, next_exit, next_expiry, self._now(), event_id, account_id),
+                (next_content, next_exit, next_expiry, self._now(), resolved_id, account_id),
             )
-            self._record_revision(account_id, event_id, "update", current["priority"],
+            self._record_revision(account_id, resolved_id, "update", current["priority"],
                                   next_content, next_exit, next_expiry, self._now())
-        return {"status": "updated", "event_id": event_id}
+        short_ref = self.store.short_refs_map(
+            account_id=account_id, items=[("event", resolved_id)]
+        ).get(("event", resolved_id), "")
+        result: dict[str, object] = {"status": "updated", "event_id": resolved_id}
+        if short_ref:
+            result["short_ref"] = short_ref
+        return result
 
     def delete(self, *, account_id: str, event_id: str) -> dict[str, object]:
+        resolved_id = self.store.resolve_short_ref(
+            account_id=account_id, value=event_id, kinds=("event",)
+        )
+        if not resolved_id:
+            return {"status": "unavailable"}
         with self.store.transaction():
             row = self.db.execute(
                 "SELECT priority,content,exit_condition,expires_at FROM event_book "
                 "WHERE event_id=? AND account_id=? AND state='active'",
-                (event_id, account_id),
+                (resolved_id, account_id),
             ).fetchone()
             now = self._now()
             cursor = self.db.execute(
                 "UPDATE event_book SET state='deleted',updated_at=? WHERE event_id=? "
                 "AND account_id=? AND state='active'",
-                (now, event_id, account_id),
+                (now, resolved_id, account_id),
             )
             if cursor.rowcount and row is not None:
-                self._record_revision(account_id, event_id, "delete", row["priority"],
+                self._record_revision(account_id, resolved_id, "delete", row["priority"],
                                       row["content"], row["exit_condition"], row["expires_at"], now)
         return {"status": "deleted" if cursor.rowcount else "unavailable"}
 

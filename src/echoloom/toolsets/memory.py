@@ -44,14 +44,55 @@ class MemoryToolset:
     def room(self) -> str:
         return active_conversation.get() or self._default_room
 
+    def _resolve_ref(
+        self,
+        value: str,
+        kinds: tuple[str, ...] | None = None,
+        *,
+        account_id: str | None = None,
+    ) -> str | None:
+        if not isinstance(value, str):
+            return None
+        resolver = getattr(self.memory_store, "resolve_short_ref", None)
+        if not callable(resolver):
+            return value.strip()
+        resolved = resolver(
+            account_id=account_id or self.account,
+            value=value,
+            kinds=kinds,
+        )
+        return str(resolved) if isinstance(resolved, str) else None
+
+    def _short_refs_map(
+        self,
+        items: list[tuple[str, str]],
+        *,
+        account_id: str | None = None,
+    ) -> dict[tuple[str, str], str]:
+        if not items:
+            return {}
+        mapper = getattr(self.memory_store, "short_refs_map", None)
+        if not callable(mapper):
+            return {}
+        mapped = mapper(account_id=account_id or self.account, items=items)
+        return dict(mapped) if isinstance(mapped, dict) else {}
+
     async def remember_user_fact(
         self, fact_key: str, content: str, source_message_id: str = ""
     ) -> dict:
         ctx = memory_context.get()
         if not self.memory_store or not ctx:
             return {"status": "unavailable"}
+        account_id = str(ctx["account_id"])
         is_idle = bool(ctx.get("is_idle_event"))
         requested_source = source_message_id.strip() if isinstance(source_message_id, str) else ""
+        if requested_source:
+            resolved_source = self._resolve_ref(
+                requested_source, ("message",), account_id=account_id,
+            )
+            if not resolved_source:
+                return {"status": "rejected", "reason": "source_message_unavailable"}
+            requested_source = resolved_source
         default_source = str(ctx.get("message_id") or "").strip()
         target_source = requested_source or default_source
         if not target_source:
@@ -70,7 +111,7 @@ class MemoryToolset:
                 return {"status": "rejected", "reason": "source_message_outside_conversation"}
         try:
             fact_id = self.memory_store.remember_fact(
-                account_id=str(ctx["account_id"]),
+                account_id=account_id,
                 fact_key=fact_key,
                 content=content,
                 source_message_id=target_source,
@@ -90,31 +131,71 @@ class MemoryToolset:
         ctx = memory_context.get()
         if not self.memory_store or not ctx:
             return {"memories": []}
+        account_id = str(ctx["account_id"])
         try:
-            return {
-                "memories": self.memory_store.search_facts(
-                    account_id=ctx["account_id"],
-                    query=query,
-                ),
-            }
+            raw_rows = self.memory_store.search_facts(
+                account_id=account_id,
+                query=query,
+            )
         except ValueError:
             return {"memories": []}
+        ref_map = self._short_refs_map(
+            [
+                ("message", str(row["source_message_id"]))
+                for row in raw_rows
+                if isinstance(row, dict) and isinstance(row.get("source_message_id"), str)
+            ],
+            account_id=account_id,
+        )
+        memories = []
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                memories.append(row)
+                continue
+            item = dict(row)
+            src_id = item.get("source_message_id")
+            if isinstance(src_id, str) and ("message", src_id) in ref_map:
+                item["source_message_ref"] = ref_map[("message", src_id)]
+            memories.append(item)
+        return {"memories": memories}
 
     async def search_message_notes(self, query: str) -> dict:
         ctx = memory_context.get()
         if not self.memory_store or not ctx:
             return {"notes": []}
+        account_id = str(ctx["account_id"])
         scope_conversation = None if ctx.get("is_idle_event") else self.room
         try:
-            return {
-                "notes": self.memory_store.search_notes(
-                    account_id=ctx["account_id"],
-                    conversation_id=scope_conversation,
-                    query=query,
-                ),
-            }
+            raw_rows = self.memory_store.search_notes(
+                account_id=account_id,
+                conversation_id=scope_conversation,
+                query=query,
+            )
         except ValueError:
             return {"notes": []}
+        lookup_items: list[tuple[str, str]] = []
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            if isinstance(row.get("note_id"), str):
+                lookup_items.append(("note", str(row["note_id"])))
+            if isinstance(row.get("message_id"), str):
+                lookup_items.append(("message", str(row["message_id"])))
+        ref_map = self._short_refs_map(lookup_items, account_id=account_id)
+        notes = []
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                notes.append(row)
+                continue
+            item = dict(row)
+            note_id = item.get("note_id")
+            msg_id = item.get("message_id")
+            if isinstance(note_id, str) and ("note", note_id) in ref_map:
+                item["short_ref"] = ref_map[("note", note_id)]
+            if isinstance(msg_id, str) and ("message", msg_id) in ref_map:
+                item["message_ref"] = ref_map[("message", msg_id)]
+            notes.append(item)
+        return {"notes": notes}
 
     async def add_message_notes(self, notes: list[dict[str, str]]) -> dict[str, object]:
         """给当前会话的精确消息 ID 留下小本本线索，每批最多 20 条。
@@ -131,25 +212,51 @@ class MemoryToolset:
                 "reason": "notes_must_contain_1_to_20_items",
                 "results": [],
             }
-        results = []
+        account_id = str(ctx["account_id"])
+        results: list[dict[str, object]] = []
         for index, entry in enumerate(notes):
             if not isinstance(entry, dict):
                 results.append({"index": index, "status": "rejected"})
                 continue
-            message_id, content = entry.get("message_id"), entry.get("content")
-            if not isinstance(message_id, str) or not isinstance(content, str):
+            raw_message_id, content = entry.get("message_id"), entry.get("content")
+            if not isinstance(raw_message_id, str) or not isinstance(content, str):
                 results.append({"index": index, "status": "rejected"})
                 continue
+            message_id = self._resolve_ref(
+                raw_message_id, ("message",), account_id=account_id,
+            )
+            if not message_id:
+                results.append({
+                    "index": index,
+                    "message_id": raw_message_id,
+                    "status": "unavailable",
+                })
+                continue
+            raw_conversation = (
+                entry.get("conversation_id")
+                if isinstance(entry.get("conversation_id"), str)
+                else None
+            )
+            resolved_conversation: str | None = None
+            if raw_conversation:
+                resolved_conversation = self._resolve_ref(
+                    raw_conversation, ("chat", "user"), account_id=account_id,
+                )
+                if not resolved_conversation:
+                    results.append({
+                        "index": index,
+                        "message_id": message_id,
+                        "status": "unavailable",
+                    })
+                    continue
             target_conversation = self._message_conversation(
                 ctx,
                 message_id,
-                entry.get("conversation_id")
-                if isinstance(entry.get("conversation_id"), str)
-                else None,
+                resolved_conversation,
             )
             if target_conversation is None or not self.memory_store.message_belongs_to(
                 message_id=message_id,
-                account_id=str(ctx["account_id"]),
+                account_id=account_id,
                 conversation_id=target_conversation,
             ):
                 results.append({
@@ -160,7 +267,7 @@ class MemoryToolset:
                 continue
             try:
                 note_id = self.memory_store.add_note(
-                    account_id=str(ctx["account_id"]),
+                    account_id=account_id,
                     message_id=message_id,
                     content=content,
                 )
@@ -177,6 +284,19 @@ class MemoryToolset:
                     "note_id": note_id,
                     "status": "saved",
                 })
+        saved_note_ids = [
+            str(item["note_id"])
+            for item in results
+            if item.get("status") == "saved" and isinstance(item.get("note_id"), str)
+        ]
+        if saved_note_ids:
+            note_refs = self._short_refs_map(
+                [("note", nid) for nid in saved_note_ids], account_id=account_id,
+            )
+            for item in results:
+                nid = item.get("note_id")
+                if isinstance(nid, str) and ("note", nid) in note_refs:
+                    item["note_ref"] = note_refs[("note", nid)]
         return {"status": "completed", "results": results}
 
     async def upsert_entity_dictionary_batch(
@@ -226,13 +346,86 @@ class MemoryToolset:
         ctx = memory_context.get()
         if not self.memory_store or not ctx:
             return {"status": "unavailable"}
+        account_id = str(ctx["account_id"])
+        resolved = self._resolve_ref(entity_id, ("entity",), account_id=account_id)
+        if not resolved:
+            return {"status": "rejected"}
         try:
             self.memory_store.delete_entity(
-                account_id=ctx["account_id"], entity_id=entity_id,
+                account_id=account_id, entity_id=resolved,
             )
             return {"status": "deleted"}
         except KeyError:
             return {"status": "rejected"}
+
+    def _resolve_sender_choice(
+        self,
+        selector: str,
+        choices: object,
+    ) -> tuple[str | None, dict[str, object] | None, dict[str, object] | None]:
+        """Resolve U# short ref, raw sender_id, or unique visible participant name."""
+        cleaned = selector.strip()
+        rows = [
+            row for row in (choices if isinstance(choices, list) else [])
+            if isinstance(row, dict) and isinstance(row.get("sender_id"), str)
+        ]
+        by_id = {str(row["sender_id"]): row for row in rows}
+        exists_fn = getattr(self.memory_store, "message_exists_for_sender", None)
+        resolved_ref = self._resolve_ref(cleaned, ("user",))
+        if resolved_ref is not None and resolved_ref != cleaned:
+            matched_row = by_id.get(resolved_ref)
+            if matched_row is not None:
+                return resolved_ref, matched_row, None
+            if callable(exists_fn) and exists_fn(self.account, resolved_ref):
+                return resolved_ref, {"sender_id": resolved_ref, "display_name": "联系人"}, None
+            return None, None, None
+        if resolved_ref is None:
+            folded = cleaned.casefold()
+            ref_matches = [
+                row for row in rows
+                if isinstance(row.get("short_ref"), str)
+                and str(row["short_ref"]).strip().casefold() == folded
+            ]
+            if len(ref_matches) == 1:
+                sid = str(ref_matches[0]["sender_id"])
+                return sid, ref_matches[0], None
+            return None, None, None
+
+        matches: dict[str, dict[str, object]] = {}
+        folded_selector = cleaned.casefold()
+        for row in rows:
+            aliases = {
+                value.strip()
+                for key in ("sender_id", "short_ref", "display_name", "nickname", "remark")
+                if isinstance((value := row.get(key)), str) and value.strip()
+            }
+            if cleaned in aliases or folded_selector in {alias.casefold() for alias in aliases}:
+                matches[str(row["sender_id"])] = row
+        if len(matches) > 1:
+            ambiguous_choices: list[dict[str, object]] = []
+            for row in matches.values():
+                item: dict[str, object] = {
+                    "sender_id": str(row["sender_id"]),
+                    "name": self._sender_choice_label(row),
+                }
+                short_ref = row.get("short_ref")
+                if isinstance(short_ref, str) and short_ref.strip():
+                    item["short_ref"] = short_ref.strip()
+                ambiguous_choices.append(item)
+            return None, None, {
+                "status": "ambiguous",
+                "reason": "sender_name_matches_multiple_people_use_sender_id",
+                "choices": ambiguous_choices,
+            }
+        if len(matches) == 1:
+            sid = next(iter(matches))
+            return sid, matches[sid], None
+        # A sender found through cross-session search may not participate in the
+        # current conversation. Permit exact, account-archived WeChat IDs while
+        # keeping name-based resolution scoped to the visible participant list.
+        if callable(exists_fn) and exists_fn(self.account, cleaned):
+            return cleaned, {"sender_id": cleaned, "display_name": "联系人"}, None
+        return None, None, None
 
     def upsert_sender_memory(
         self, sender_id: str, topic: str, content: str,
@@ -240,10 +433,22 @@ class MemoryToolset:
         """Save a concise sourced note about a sender seen in this account's archive."""
         if self.memory_store is None:
             return {"status": "unavailable", "reason": "memory_store_not_configured"}
+        if not isinstance(sender_id, str) or not sender_id.strip():
+            return {"status": "rejected", "reason": "choose_a_sender_name"}
+        ctx = memory_context.get() or {}
+        choices = ctx.get("sender_choices", [])
+        resolved_id, _row, ambiguous = self._resolve_sender_choice(sender_id, choices)
+        if ambiguous is not None:
+            return ambiguous
+        if resolved_id is None:
+            raw_ref = self._resolve_ref(sender_id, ("user",))
+            if raw_ref is None:
+                return {"status": "rejected", "reason": "sender_not_found"}
+            resolved_id = raw_ref
         try:
             memory_id, created = self.memory_store.upsert_sender_memory(
                 account_id=self.account,
-                sender_id=sender_id,
+                sender_id=resolved_id,
                 topic=topic,
                 content=content,
             )
@@ -255,8 +460,11 @@ class MemoryToolset:
         """Delete one sender note by its exact memory ID."""
         if self.memory_store is None:
             return {"status": "unavailable", "reason": "memory_store_not_configured"}
+        resolved = self._resolve_ref(memory_id, ("memory",))
+        if not resolved:
+            return {"status": "unavailable"}
         deleted = self.memory_store.delete_sender_memory(
-            account_id=self.account, memory_id=memory_id,
+            account_id=self.account, memory_id=resolved,
         )
         return {"status": "deleted" if deleted else "unavailable"}
 
@@ -277,47 +485,13 @@ class MemoryToolset:
         if not isinstance(content, str) or not content.strip():
             return {"status": "rejected", "reason": "profile_content_is_required"}
 
-        selector = selector.strip()
-        rows = choices if isinstance(choices, list) else []
-        matches: dict[str, dict[str, object]] = {}
-        folded_selector = selector.casefold()
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("sender_id"), str):
-                continue
-            aliases = {
-                value.strip()
-                for key in ("sender_id", "display_name", "nickname", "remark")
-                if isinstance((value := row.get(key)), str) and value.strip()
-            }
-            if selector in aliases or folded_selector in {alias.casefold() for alias in aliases}:
-                matches[str(row["sender_id"])] = row
-        # A sender found through cross-session search may not participate in the
-        # current conversation. Permit exact, account-archived WeChat IDs while
-        # keeping name-based resolution scoped to the visible participant list.
-        if (
-            not matches
-            and self.memory_store is not None
-            and self.memory_store.message_exists_for_sender(self.account, selector)
-        ):
-            matches[selector] = {"sender_id": selector, "display_name": "联系人"}
-        if len(matches) != 1:
-            if len(matches) > 1:
-                return {
-                    "status": "ambiguous",
-                    "reason": "sender_name_matches_multiple_people_use_sender_id",
-                    "choices": [
-                        {
-                            "sender_id": str(row["sender_id"]),
-                            "name": self._sender_choice_label(row),
-                        }
-                        for row in matches.values()
-                    ],
-                }
+        sender_id, selected_row, ambiguous = self._resolve_sender_choice(selector, choices)
+        if ambiguous is not None:
+            return ambiguous
+        if sender_id is None or selected_row is None:
             return {"status": "rejected", "reason": "sender_name_not_in_current_conversation"}
 
-        sender_id = next(iter(matches))
         result = self.upsert_sender_memory(sender_id, topic.strip(), content.strip())
-        selected_row = matches[sender_id]
         return {
             "sender": self._sender_choice_label(selected_row),
             "sender_id": sender_id,
@@ -334,14 +508,26 @@ class MemoryToolset:
         self, tag_updates: list[dict[str, object]],
     ) -> list[dict[str, object]]:
         ctx = memory_context.get() or {}
+        choices = ctx.get("sender_choices", [])
         tag_results: list[dict[str, object]] = []
         for entry in tag_updates[:20]:
             if not isinstance(entry, dict) or self.memory_store is None:
                 tag_results.append({"status": "unavailable"})
                 continue
+            selector = entry.get("sender_id") or entry.get("sender") or entry.get("name")
+            if not isinstance(selector, str) or not selector.strip():
+                tag_results.append({"status": "unavailable", "reason": "sender_not_in_archive"})
+                continue
+            resolved_id, _row, ambiguous = self._resolve_sender_choice(selector, choices)
+            if ambiguous is not None:
+                tag_results.append(ambiguous)
+                continue
+            if resolved_id is None:
+                tag_results.append({"status": "unavailable", "reason": "sender_not_in_archive"})
+                continue
             tag_results.append(self.memory_store.update_sender_tags(
                 account_id=self.account,
-                sender_id=str(entry.get("sender_id", "")),
+                sender_id=resolved_id,
                 # “给某人打上标签” is the common natural-language request.
                 # Make that operation the safe default; removals and full
                 # replacement remain explicit.
@@ -363,15 +549,23 @@ class MemoryToolset:
             if not isinstance(entry, dict):
                 note_results.append({"index": index, "status": "rejected"})
                 continue
-            image_id, description = entry.get("image_id"), entry.get("content")
+            raw_image_id, description = entry.get("image_id"), entry.get("content")
             if (
                 self.memory_store is None
-                or not isinstance(image_id, str)
+                or not isinstance(raw_image_id, str)
                 or not isinstance(description, str)
                 or not description.strip()
                 or len(description) > 4000
             ):
                 note_results.append({"index": index, "status": "rejected"})
+                continue
+            image_id = self._resolve_ref(raw_image_id, ("image",))
+            if not image_id:
+                note_results.append({
+                    "index": index,
+                    "image_id": raw_image_id,
+                    "status": "unavailable",
+                })
                 continue
             conversation_id = str(ctx.get("conversation_id") or self.room)
             try:

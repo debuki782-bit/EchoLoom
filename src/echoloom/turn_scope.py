@@ -140,6 +140,7 @@ def tool_memory_context(window: ContextWindow) -> dict[str, object]:
             or (turn.source_conversation_id or window.conversation_id) == window.conversation_id
         }
     )
+    short_refs = getattr(window, "short_refs", {}) or {}
     return {
         "account_id": window.account_id,
         "conversation_id": window.conversation_id,
@@ -153,6 +154,9 @@ def tool_memory_context(window: ContextWindow) -> dict[str, object]:
         "sender_choices": [
             {
                 "sender_id": sender_id,
+                "short_ref": (
+                    short_refs.get(("user", sender_id)) or short_refs.get(("chat", sender_id))
+                ),
                 "display_name": _safe_identity_name(sender_id, identity, trusted_ids),
                 "nickname": identity.nickname if identity else None,
                 "remark": identity.remark if identity else None,

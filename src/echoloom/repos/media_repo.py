@@ -18,6 +18,7 @@ from ..contacts import is_group_conversation
 if TYPE_CHECKING:
     from .knowledge_repo import KnowledgeRepo
     from .message_repo import MessageRepo
+    from .short_ref_repo import ShortRefRepo
 
 
 def _now() -> str:
@@ -45,6 +46,7 @@ class MediaRepo:
         file_root: Path | None = None,
         messages: MessageRepo | None = None,
         knowledge: KnowledgeRepo | None = None,
+        short_refs: ShortRefRepo | None = None,
     ) -> None:
         self.db = db
         self._lock = lock
@@ -58,6 +60,7 @@ class MediaRepo:
         )
         self._messages = messages
         self._knowledge = knowledge
+        self._short_refs = short_refs
 
     def _message_in_scope(self, message_id: str, account_id: str) -> bool:
         if self._messages is not None:
@@ -180,6 +183,10 @@ class MediaRepo:
                     image_id,
                 ),
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id, kind="image", target_id=image_id
+                )
         if note:
             if self._knowledge is None:
                 raise RuntimeError("knowledge repository is not configured on MediaRepo")
@@ -323,6 +330,10 @@ class MediaRepo:
                     now,
                 ),
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id, kind="image", target_id=image_id
+                )
         return {
             "status": "imported",
             "image_id": image_id,
@@ -362,6 +373,10 @@ class MediaRepo:
                 "state,created_at,updated_at) VALUES (?,?,?,?,?,'pending',?,?)",
                 (image_id, account_id, conversation_id, message_id, refs_json, now, now),
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id, kind="image", target_id=image_id
+                )
             return dict(
                 self.db.execute(
                     "SELECT * FROM message_media WHERE image_id=?",
@@ -772,6 +787,10 @@ class MediaRepo:
                 "VALUES (?,?,?,?,'pending','audio/wav',?,'not_started',?,?)",
                 (audio_id, account_id, conversation_id, message_id, duration_ms, now, now),
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id, kind="audio", target_id=audio_id
+                )
             return dict(
                 self.db.execute(
                     "SELECT * FROM message_audio WHERE audio_id=?",
@@ -1047,6 +1066,10 @@ class MediaRepo:
                     now,
                 ),
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id, kind="file", target_id=file_id
+                )
             return dict(
                 self.db.execute(
                     f"SELECT {self._FILE_PUBLIC_COLUMNS},artifact_path FROM message_files WHERE file_id=?",
@@ -1214,6 +1237,10 @@ class MediaRepo:
                     now,
                 ),
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id, kind="file", target_id=file_id
+                )
         return {"message_id": archived.message_id, "file_id": file_id}
 
     def file_metadata_for_message(

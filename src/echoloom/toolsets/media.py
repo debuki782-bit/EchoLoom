@@ -110,6 +110,24 @@ class MediaToolset:
     def room(self) -> str:
         return active_conversation.get() or self._default_room
 
+    def _resolve_ref(self, value: str, kinds: tuple[str, ...]) -> str | None:
+        if not isinstance(value, str):
+            return None
+        resolver = getattr(self.memory_store, "resolve_short_ref", None)
+        if not callable(resolver):
+            return value.strip()
+        resolved = resolver(account_id=self.account, value=value, kinds=kinds)
+        return str(resolved) if isinstance(resolved, str) else None
+
+    def _short_refs_map(self, items: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
+        if not items:
+            return {}
+        mapper = getattr(self.memory_store, "short_refs_map", None)
+        if not callable(mapper):
+            return {}
+        mapped = mapper(account_id=self.account, items=items)
+        return dict(mapped) if isinstance(mapped, dict) else {}
+
     def list_wechat_images(
         self, include_all_conversations: bool = False, limit: int = 10, offset: int = 0,
     ) -> dict:
@@ -163,6 +181,9 @@ class MediaToolset:
                 limit=limit,
                 offset=offset,
             )
+            image_refs = self._short_refs_map(
+                [("image", str(img["image_id"])) for img in stored_images if img.get("image_id")]
+            )
             for index, image in enumerate(stored_images):
                 path = Path(str(image["artifact_path"])).resolve()
                 if (
@@ -180,6 +201,9 @@ class MediaToolset:
                     "quick_send": bool(image.get("quick_send")),
                     "display_order": int(image.get("display_order") or 0),
                 }
+                short_ref = image_refs.get(("image", image_id))
+                if short_ref:
+                    entry["short_ref"] = short_ref
                 if include_all_conversations:
                     entry["conversation_id"] = image["conversation_id"]
                     entry["message_id"] = image["message_id"]
@@ -242,15 +266,22 @@ class MediaToolset:
         """
         if self.memory_store is None:
             return {"status": "unavailable", "reason": "图片库暂不可用。"}
+        resolved = self._resolve_ref(image_id, ("image",))
+        if not resolved:
+            return {"status": "unavailable", "reason": "未找到对应的图片编号。"}
         return self.memory_store.manage_image_library(
             account_id=self.account,
-            image_id=image_id,
+            image_id=resolved,
             description=description,
             quick_send=quick_send,
             display_order=display_order,
         )
 
     def _image(self, image_id: str) -> Path:
+        resolved = self._resolve_ref(image_id, ("image",))
+        if not resolved:
+            raise ValueError("unknown image_id; use list_wechat_images")
+        image_id = resolved
         path = self.images.get(image_id)
         if path is None and self.memory_store is not None:
             image = self.memory_store.get_image_by_id(
@@ -280,17 +311,20 @@ class MediaToolset:
 
     async def _image_for_read(self, image_reference: str) -> dict | None:
         """Resolve once and refresh local originals for both reading paths."""
+        resolved = self._resolve_ref(image_reference, ("image",))
+        if not resolved:
+            return None
         image = self.memory_store.get_image_by_id(
             account_id=self.account,
             conversation_id=None,
-            image_id=image_reference,
+            image_id=resolved,
             include_unready=True,
         )
         if image is None:
             reference = self.memory_store.get_image_by_reference(
                 account_id=self.account,
                 conversation_id=self.room,
-                reference=image_reference,
+                reference=resolved,
                 include_unready=True,
             )
             if reference is not None:
@@ -725,18 +759,23 @@ class MediaToolset:
                 return None, {"error": "no_saved_file_in_current_chat"}
             return found, None
 
-        found = self.memory_store.get_file_by_id(
-            account_id=self.account,
-            conversation_id=None,
-            file_id=ref,
-            include_unready=True,
-        )
-        if found is None:
-            found = self.memory_store.get_file_for_message(
+        found = None
+        resolved_file = self._resolve_ref(ref, ("file",))
+        if resolved_file:
+            found = self.memory_store.get_file_by_id(
                 account_id=self.account,
-                conversation_id=self.room,
-                message_id=ref,
+                conversation_id=None,
+                file_id=resolved_file,
+                include_unready=True,
             )
+        if found is None:
+            resolved_msg = self._resolve_ref(ref, ("message",))
+            if resolved_msg:
+                found = self.memory_store.get_file_for_message(
+                    account_id=self.account,
+                    conversation_id=self.room,
+                    message_id=resolved_msg,
+                )
         if found is None:
             return None, {"error": "file_not_found", "file_reference": ref}
         allowed = set(ctx.get("allowed_conversations") or ()) | {self.room}
@@ -1073,8 +1112,11 @@ class MediaToolset:
         if self.outbound.is_send_blocked():
             return self.outbound.send_block_feedback()
         try:
-            path = self._image(image_id)
-            return await self.outbound.send_image(image_id, path, note=note)
+            resolved = self._resolve_ref(image_id, ("image",))
+            if not resolved:
+                return {"status": "rejected", "reason": "unknown_image_id", "delivered": False}
+            path = self._image(resolved)
+            return await self.outbound.send_image(resolved, path, note=note)
         except Exception:  # noqa: BLE001
             return {"status": "unknown", "delivered": False}
 

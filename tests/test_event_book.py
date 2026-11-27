@@ -97,3 +97,89 @@ def test_ordinary_event_generation_age_uses_latest_revision_time(tmp_path):
         (entry["event_id"],),
     ).fetchone()[0] == 3
     store.close()
+
+
+def test_event_book_short_refs_render_update_delete_and_backfill(tmp_path):
+    db_path = tmp_path / "event-short-refs.sqlite3"
+    store = MemoryStore(db_path)
+    book = EventBook(store)
+    try:
+        first = book.add(
+            account_id="bot",
+            priority="high",
+            content="周五大扫除",
+            exit_condition="大扫除完成",
+        )
+        second = book.add(
+            account_id="bot",
+            priority="ordinary",
+            content="买猫砂",
+            exit_condition="到货后删除",
+        )
+        assert first["short_ref"] == "E1"
+        assert second["short_ref"] == "E2"
+
+        entries = book.list_entries("bot")
+        by_id = {row["event_id"]: row for row in entries}
+        assert by_id[first["event_id"]]["short_ref"] == "E1"
+        assert by_id[second["event_id"]]["short_ref"] == "E2"
+
+        rendered = book.render("bot")
+        assert "[E1] 周五大扫除" in rendered
+        assert "[E2] 买猫砂" in rendered
+        assert str(first["event_id"]) not in rendered
+        assert str(second["event_id"]) not in rendered
+
+        # Update via lowercase short ref and raw event_id
+        upd_short = book.update(account_id="bot", event_id="e1", content="周六大扫除")
+        assert upd_short["status"] == "updated"
+        assert upd_short["event_id"] == first["event_id"]
+        assert "[E1] 周六大扫除" in book.render("bot")
+
+        upd_raw = book.update(
+            account_id="bot", event_id=str(second["event_id"]), content="买豆腐猫砂"
+        )
+        assert upd_raw["status"] == "updated"
+
+        # Unknown short ref or wrong-kind short ref returns unavailable
+        msg = store.archive_message(
+            account_id="bot",
+            conversation_id="wxid_friend",
+            sender_id="wxid_friend",
+            raw_envelope={"msg": "hi"},
+            body_text="hi",
+        )
+        assert store.short_refs_map(account_id="bot", items=[("message", msg.message_id)])[
+            ("message", msg.message_id)
+        ] == "M1"
+        assert book.update(account_id="bot", event_id="E999", content="nope") == {
+            "status": "unavailable"
+        }
+        assert book.update(account_id="bot", event_id="M1", content="wrong kind") == {
+            "status": "unavailable"
+        }
+        assert book.delete(account_id="bot", event_id="E999") == {"status": "unavailable"}
+        assert book.delete(account_id="bot", event_id="M1") == {"status": "unavailable"}
+
+        # Delete via short ref and raw ID
+        assert book.delete(account_id="bot", event_id="E1") == {"status": "deleted"}
+        assert book.delete(account_id="bot", event_id=str(second["event_id"])) == {
+            "status": "deleted"
+        }
+        assert book.list_entries("bot") == []
+
+        # Backfill inside EventBook.__init__ for legacy unmapped rows
+        with store.transaction():
+            store.db.execute(
+                "INSERT INTO event_book VALUES "
+                "('evt_legacy_1','bot','ordinary','旧事件','完成删除',NULL,'active',"
+                "'2026-10-29T10:00:00+00:00','2026-10-29T10:00:00+00:00')"
+            )
+        reloaded_book = EventBook(store)
+        reloaded_entries = reloaded_book.list_entries("bot")
+        assert len(reloaded_entries) == 1
+        assert reloaded_entries[0]["event_id"] == "evt_legacy_1"
+        assert reloaded_entries[0]["short_ref"] == "E3"
+        assert "[E3] 旧事件" in reloaded_book.render("bot")
+    finally:
+        store.close()

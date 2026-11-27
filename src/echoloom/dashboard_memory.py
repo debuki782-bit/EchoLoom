@@ -205,9 +205,14 @@ def _source_previews(
             f"FROM source_messages WHERE account_id=? AND message_id IN ({placeholders})",
             (account_id, *unique_ids),
         ).fetchall()
+    msg_refs = store.short_refs_map(
+        account_id=account_id,
+        items=[("message", mid) for mid in unique_ids],
+    )
     return {
         str(row["message_id"]): {
             "message_id": str(row["message_id"]),
+            "short_ref": msg_refs.get(("message", str(row["message_id"])), ""),
             "conversation_id": str(row["conversation_id"]),
             "sender_id": str(row["sender_id"]),
             "body_text": str(row["body_text"])[:400],
@@ -289,15 +294,38 @@ def _episode_conversation_ids(episode_db_path: Path | None, account_id: str) -> 
         return []
 
 
-async def resolve_display_names(
+def resolve_identity_short_refs(
+    store: MemoryStore | None,
+    *,
+    account_ids: Sequence[str],
+    contact_ids: Sequence[str],
+) -> dict[str, str]:
+    """Read-only lookup of U#/G# short refs for contacts and chats across accounts."""
+    if store is None or not account_ids or not contact_ids:
+        return {}
+    items = [
+        (store.identity_ref_kind(cid), cid)
+        for cid in dict.fromkeys(c.strip() for c in contact_ids if c.strip())
+    ]
+    if not items:
+        return {}
+    short_refs: dict[str, str] = {}
+    for acct in reversed(account_ids):
+        ref_map = store.short_refs_map(account_id=acct, items=items)
+        for (_, cid), ref in ref_map.items():
+            short_refs[cid] = ref
+    return short_refs
+
+
+async def resolve_display_names_and_refs(
     *,
     store: MemoryStore | None,
     account_ids: Sequence[str] | None = None,
     extra_ids: Sequence[str] = (),
     contact_resolver: Callable[[str], ContactIdentity | None] | None = None,
     episode_db_path: Path | None = None,
-) -> dict[str, str]:
-    """Build {id: display_label} from remarks, live resolver (write-through), and cache."""
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Build {id: display_label} and read-only {id: U#/G#} maps for dashboard views."""
     remarks: dict[str, str] = {}
     cached_nicknames: dict[str, str] = {}
     dir_by_acct: dict[str, dict[str, dict[str, str]]] = {}
@@ -367,6 +395,11 @@ async def resolve_display_names(
             except (sqlite3.Error, ValueError):
                 pass
 
+    short_refs = resolve_identity_short_refs(
+        store,
+        account_ids=target_accounts,
+        contact_ids=all_ids,
+    )
     names: dict[str, str] = {}
     for cid in all_ids:
         label = format_human_display_name(
@@ -375,6 +408,25 @@ async def resolve_display_names(
         )
         if label:
             names[cid] = label
+    return names, short_refs
+
+
+async def resolve_display_names(
+    *,
+    store: MemoryStore | None,
+    account_ids: Sequence[str] | None = None,
+    extra_ids: Sequence[str] = (),
+    contact_resolver: Callable[[str], ContactIdentity | None] | None = None,
+    episode_db_path: Path | None = None,
+) -> dict[str, str]:
+    """Build {id: display_label} from remarks, live resolver (write-through), and cache."""
+    names, _ = await resolve_display_names_and_refs(
+        store=store,
+        account_ids=account_ids,
+        extra_ids=extra_ids,
+        contact_resolver=contact_resolver,
+        episode_db_path=episode_db_path,
+    )
     return names
 
 
@@ -401,6 +453,7 @@ def register_memory_routes(
                     "accounts": accounts,
                     "account_id": "",
                     "names": {},
+                    "short_refs": {},
                     "counts": {
                         "facts_total": 0,
                         "facts_in_index": 0,
@@ -471,7 +524,7 @@ def register_memory_routes(
 
             indexed_keys = store.fact_key_index(account_id=selected, limit=FACT_INDEX_LIMIT)
             ep_available, ep_total, ep_bloated = _episode_stats(episode_path, selected)
-            names = await resolve_display_names(
+            names, short_refs = await resolve_display_names_and_refs(
                 store=store,
                 account_ids=[selected],
                 extra_ids=accounts,
@@ -482,6 +535,7 @@ def register_memory_routes(
             "accounts": accounts,
             "account_id": selected,
             "names": names,
+            "short_refs": short_refs,
             "counts": {
                 "facts_total": facts_total,
                 "facts_in_index": len(indexed_keys),
@@ -581,22 +635,43 @@ def register_memory_routes(
                     "ORDER BY f.updated_at DESC, f.fact_id DESC",
                     (selected,),
                 ).fetchall()
+            msg_refs = store.short_refs_map(
+                account_id=selected,
+                items=[
+                    ("message", str(row["source_message_id"]))
+                    for row in rows
+                    if row["src_body_text"] is not None
+                ],
+            )
         needle = q.strip().casefold()
         items = []
         for row in rows:
             fact_key = str(row["fact_key"])
             content = str(row["content"])
             src_body = str(row["src_body_text"] or "")
-            if needle and needle not in f"{fact_key} {content} {src_body}".casefold():
+            source_mid = str(row["source_message_id"])
+            source_ref = msg_refs.get(("message", source_mid), "")
+            if needle and needle not in f"{fact_key} {content} {src_body} {source_ref}".casefold():
                 continue
             rank = rank_by_key.get(fact_key)
+            source_payload: dict[str, str] | None = None
+            if row["src_body_text"] is not None:
+                source_payload = {
+                    "message_id": source_mid,
+                    "conversation_id": str(row["src_conversation_id"] or ""),
+                    "sender_id": str(row["src_sender_id"] or ""),
+                    "body_text": src_body[:400],
+                    "captured_at": str(row["src_captured_at"] or ""),
+                }
+                if source_ref:
+                    source_payload["source_short_ref"] = source_ref
             items.append(
                 {
                     "fact_id": str(row["fact_id"]),
                     "account_id": str(row["account_id"]),
                     "fact_key": fact_key,
                     "content": content,
-                    "source_message_id": str(row["source_message_id"]),
+                    "source_message_id": source_mid,
                     "author_id": str(row["author_id"]),
                     "trust_label": str(row["trust_label"]),
                     "version": int(row["version"]),
@@ -604,17 +679,7 @@ def register_memory_routes(
                     "updated_at": str(row["updated_at"]),
                     "in_index": rank is not None,
                     "index_rank": rank,
-                    "source": (
-                        {
-                            "message_id": str(row["source_message_id"]),
-                            "conversation_id": str(row["src_conversation_id"] or ""),
-                            "sender_id": str(row["src_sender_id"] or ""),
-                            "body_text": src_body[:400],
-                            "captured_at": str(row["src_captured_at"] or ""),
-                        }
-                        if row["src_body_text"] is not None
-                        else None
-                    ),
+                    "source": source_payload,
                 }
             )
         return {"account_id": selected, "facts": items, "index_limit": FACT_INDEX_LIMIT}
@@ -669,11 +734,16 @@ def register_memory_routes(
                     "ORDER BY captured_at DESC, message_id DESC LIMIT ?",
                     (selected, bounded),
                 ).fetchall()
+            msg_refs = store.short_refs_map(
+                account_id=selected,
+                items=[("message", str(row["message_id"])) for row in rows],
+            )
         return {
             "account_id": selected,
             "messages": [
                 {
                     "message_id": str(row["message_id"]),
+                    "short_ref": msg_refs.get(("message", str(row["message_id"])), ""),
                     "conversation_id": str(row["conversation_id"]),
                     "sender_id": str(row["sender_id"]),
                     "body_text": str(row["body_text"])[:160],
@@ -714,13 +784,18 @@ def register_memory_routes(
         for row in entries:
             content = str(row["content"])
             exit_cond = str(row["exit_condition"])
-            if needle and needle not in f"{content} {exit_cond} {row['event_id']}".casefold():
+            short_ref = str(row.get("short_ref") or "")
+            if (
+                needle
+                and needle not in f"{content} {exit_cond} {row['event_id']} {short_ref}".casefold()
+            ):
                 continue
             elapsed_seconds = EventBook._elapsed_seconds(row["updated_at"], now)
             age_hours = int(elapsed_seconds // 3600)
             items.append(
                 {
                     "event_id": str(row["event_id"]),
+                    "short_ref": short_ref,
                     "priority": str(row["priority"]),
                     "content": content,
                     "exit_condition": exit_cond,
@@ -812,16 +887,23 @@ def register_memory_routes(
                     "ORDER BY updated_at DESC, term ASC",
                     (selected,),
                 ).fetchall()
+            entity_refs = store.short_refs_map(
+                account_id=selected,
+                items=[("entity", str(row["entity_id"])) for row in rows],
+            )
         needle = q.strip().casefold()
         items = []
         for row in rows:
+            entity_id = str(row["entity_id"])
             term = str(row["term"])
             explanation = str(row["explanation"])
-            if needle and needle not in f"{term} {explanation}".casefold():
+            short_ref = entity_refs.get(("entity", entity_id), "")
+            if needle and needle not in f"{term} {explanation} {short_ref}".casefold():
                 continue
             items.append(
                 {
-                    "entity_id": str(row["entity_id"]),
+                    "entity_id": entity_id,
+                    "short_ref": short_ref,
                     "account_id": str(row["account_id"]),
                     "term": term,
                     "explanation": explanation,
@@ -898,18 +980,32 @@ def register_memory_routes(
             sql += " ORDER BY a.updated_at DESC, a.note_id DESC LIMIT 300"
             with store._lock:
                 rows = store.db.execute(sql, params).fetchall()
+            ref_items: list[tuple[str, str]] = [
+                ("note", str(row["note_id"])) for row in rows
+            ]
+            ref_items.extend(
+                ("message", str(row["message_id"]))
+                for row in rows
+                if row["src_body_text"] is not None
+            )
+            ann_refs = store.short_refs_map(account_id=selected, items=ref_items)
         items = []
         for row in rows:
+            note_id = str(row["note_id"])
+            message_id = str(row["message_id"])
             content = str(row["content"])
             src_body = str(row["src_body_text"] or "")
             conv_id = str(row["src_conversation_id"] or "")
-            if needle and needle not in f"{content} {src_body} {conv_id}".casefold():
+            note_ref = ann_refs.get(("note", note_id), "")
+            msg_ref = ann_refs.get(("message", message_id), "")
+            if needle and needle not in f"{content} {src_body} {conv_id} {note_ref} {msg_ref}".casefold():
                 continue
             items.append(
                 {
-                    "note_id": str(row["note_id"]),
+                    "note_id": note_id,
+                    "short_ref": note_ref,
                     "account_id": str(row["account_id"]),
-                    "message_id": str(row["message_id"]),
+                    "message_id": message_id,
                     "author_kind": str(row["author_kind"]),
                     "author_id": str(row["author_id"]),
                     "trust_label": str(row["trust_label"]),
@@ -921,7 +1017,8 @@ def register_memory_routes(
                     "editable": str(row["author_kind"]) == "agent",
                     "source_message": (
                         {
-                            "message_id": str(row["message_id"]),
+                            "message_id": message_id,
+                            "short_ref": msg_ref,
                             "conversation_id": conv_id,
                             "sender_id": str(row["src_sender_id"] or ""),
                             "body_text": src_body[:400],

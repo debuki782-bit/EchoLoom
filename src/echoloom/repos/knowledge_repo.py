@@ -9,7 +9,13 @@ import unicodedata
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import uuid4
+
+from .short_ref_repo import identity_ref_kind
+
+if TYPE_CHECKING:
+    from .short_ref_repo import ShortRefRepo
 
 MAX_NOTE_CHARS = 4000
 MAX_FACT_CHARS = 2000
@@ -56,10 +62,13 @@ class KnowledgeRepo:
         db: sqlite3.Connection,
         lock: threading.RLock,
         transaction_fn: Callable[[], AbstractContextManager[None]],
+        *,
+        short_refs: ShortRefRepo | None = None,
     ) -> None:
         self.db = db
         self._lock = lock
         self._transaction = transaction_fn
+        self._short_refs = short_refs
 
     def _message_in_scope(self, message_id: str, account_id: str) -> bool:
         return (
@@ -268,6 +277,10 @@ class KnowledgeRepo:
             self._audit(
                 account_id, "agent", author_id, "note.create", "annotation", note_id, 1, now
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id, kind="note", target_id=note_id
+                )
         return note_id
 
     def ensure_note(self, *, account_id: str, message_id: str, content: str) -> None:
@@ -611,6 +624,10 @@ class KnowledgeRepo:
                 version,
                 now,
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id, kind="entity", target_id=entity_id
+                )
         return entity_id
 
     def upsert_sender_memory(
@@ -638,6 +655,10 @@ class KnowledgeRepo:
                 "VALUES (?,?,?,?,?,'untrusted_reference_data','active',?,?)",
                 (memory_id, account_id, sender_id, topic, content, now, now),
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id, kind="memory", target_id=memory_id
+                )
         return memory_id, True
 
     def sender_memories(
@@ -743,7 +764,7 @@ class KnowledgeRepo:
             return False
         now = _now()
         with self._transaction():
-            return self._upsert_contact_directory_row(
+            changed = self._upsert_contact_directory_row(
                 account_id=account_id,
                 contact_id=contact_id,
                 nickname=nickname,
@@ -751,6 +772,13 @@ class KnowledgeRepo:
                 source=source_clean,
                 now=now,
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id,
+                    kind=identity_ref_kind(contact_id),
+                    target_id=contact_id,
+                )
+            return changed
 
     def upsert_contact_directory_batch(
         self, *, account_id: str, entries: Sequence[tuple[str, str, str]]
@@ -798,6 +826,11 @@ class KnowledgeRepo:
                     now=now,
                 ):
                     changed += 1
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_refs_batch(
+                    account_id=account_id,
+                    items=[(identity_ref_kind(cid), cid) for cid in deduped],
+                )
         return changed
 
     def contact_directory_map(
@@ -907,6 +940,12 @@ class KnowledgeRepo:
                 version,
                 now,
             )
+            if self._short_refs is not None:
+                self._short_refs.ensure_short_ref(
+                    account_id=account_id,
+                    kind=identity_ref_kind(sender_id),
+                    target_id=sender_id,
+                )
         return {"status": "cleared" if not remark else "saved", "version": version}
 
     def priority_sender_profiles(

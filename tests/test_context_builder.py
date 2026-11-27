@@ -721,3 +721,113 @@ def test_context_builder_collects_pat_and_quote_ids_and_uses_contact_directory_c
         ) in offline_user
     finally:
         store.close()
+
+
+def test_context_builder_renders_short_refs_and_is_safe_under_query_only(tmp_path: Path) -> None:
+    """ContextBuilder populates M/U/G/N/I/A/F short refs and stays safe under PRAGMA query_only=ON."""
+    store, scheduler = _seed_store(tmp_path)
+    hist_msg = store.recent_messages(
+        account_id="wxid_bot001", conversation_id="room@chatroom", limit=5
+    )[0]
+    note_id = store.add_note(
+        account_id="wxid_bot001",
+        message_id=str(hist_msg["message_id"]),
+        content="关键讨论记录",
+    )
+    img_row = store.begin_image_ingest(
+        account_id="wxid_bot001",
+        conversation_id="room@chatroom",
+        message_id=str(hist_msg["message_id"]),
+        original_references=(),
+    )
+    aud_row = store.begin_audio_ingest(
+        account_id="wxid_bot001",
+        conversation_id="room@chatroom",
+        message_id=str(hist_msg["message_id"]),
+        duration_ms=1200,
+    )
+    file_row = store.begin_file_ingest(
+        account_id="wxid_bot001",
+        conversation_id="room@chatroom",
+        message_id=str(hist_msg["message_id"]),
+        original_references=(),
+        filename="spec.txt",
+        fileext="txt",
+        expected_bytes=5,
+    )
+
+    builder = ContextBuilder(
+        store,
+        resolve_contact=lambda uid: ContactIdentity(uid, user_name=uid, nickname=f"昵称-{uid[-4:]}"),
+        time_scheduler=scheduler,
+    )
+
+    # Lock SQLite strictly read-only and verify existing short refs still load + unmapped IDs don't crash!
+    store.db.execute("PRAGMA query_only = ON")
+    try:
+        built = asyncio.run(
+            builder.build(
+                ContextSpec.for_chat(
+                    observations=(_obs("最新消息", tick=9999),),
+                )
+            )
+        )
+        window = built.context
+        refs = window.short_refs
+        room_ref = refs[("chat", "room@chatroom")]
+        other_ref = refs[("chat", "other@chatroom")]
+        owner_ref = refs[("user", "wxid_owner001")]
+        msg_ref = refs[("message", str(hist_msg["message_id"]))]
+        note_ref = refs[("note", note_id)]
+        img_ref = refs[("image", str(img_row["image_id"]))]
+        aud_ref = refs[("audio", str(aud_row["audio_id"]))]
+        file_ref = refs[("file", str(file_row["file_id"]))]
+        quick_id = str(window.quick_send_images[0]["image_id"])
+        quick_ref = refs[("image", quick_id)]
+
+        assert room_ref.startswith("G")
+        assert other_ref.startswith("G")
+        assert owner_ref.startswith("U")
+        assert msg_ref.startswith("M")
+        assert note_ref.startswith("N")
+        assert img_ref.startswith("I")
+        assert quick_ref.startswith("I")
+        assert aud_ref.startswith("A")
+        assert file_ref.startswith("F")
+
+        assert f"会话 ID：{room_ref}。" in window.model_session_context()
+        ref_ctx = window.model_reference_context()
+        assert f"{owner_ref} → 主人备注" in ref_ctx
+        assert f"{owner_ref} | 主人备注" in ref_ctx
+        assert f"{quick_ref}：开心猫猫图" in ref_ctx
+        hist_text = "\n".join(window.model_history_records())
+        assert f"消息ID：{msg_ref}" in hist_text
+        assert f"备注（{note_ref}）：关键讨论记录" in hist_text
+        assert f"图片：{img_ref}（状态：" in hist_text
+        assert f"语音：{aud_ref}（状态：" in hist_text
+        assert f"文件：{file_ref} spec.txt（状态：" in hist_text
+        assert f"讨论串「昵称-room」（群聊；ID：{other_ref}）：" in window.model_cross_chat_context()
+
+        # Unmapped extra_identifier under query_only=ON must not raise and falls back to raw ID
+        xs_built = asyncio.run(
+            builder.build(
+                ContextSpec.for_cross_session(
+                    account_id="wxid_bot001",
+                    conversation_id="room@chatroom",
+                    extra_identifiers=("wxid_brand_new",),
+                )
+            )
+        )
+        assert ("user", "wxid_brand_new") not in xs_built.context.short_refs
+        assert "wxid_brand_new → （昵称-_new）" in xs_built.context.model_reference_context()
+
+        # Idle snapshot + idle timeline headers use G#/U# even under query_only=ON
+        idle_built = asyncio.run(
+            builder.build(ContextSpec.for_idle(account_id="wxid_bot001", event_id="ro_idle"))
+        )
+        idle_user = idle_built.context.model_user_content()
+        assert f"（{room_ref}）：" in idle_user
+        assert f"({room_ref})" in idle_built.context.turns[0].text
+    finally:
+        store.db.execute("PRAGMA query_only = OFF")
+        store.close()

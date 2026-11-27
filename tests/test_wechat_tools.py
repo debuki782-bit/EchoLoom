@@ -1278,3 +1278,304 @@ def test_idle_mode_unlocks_historical_notes_user_facts_and_cross_chat_search(tmp
             memory.close()
 
     asyncio.run(scenario())
+
+
+def test_phase2_memory_and_tag_tools_support_short_refs_and_safe_disambiguation(tmp_path: Path):
+    from echoloom.contacts import ContactIdentity
+    from echoloom.context import ContextTurn, ContextWindow
+    from echoloom.turn_scope import tool_memory_context
+
+    async def scenario():
+        (tmp_path / "data").mkdir()
+        memory = MemoryStore(tmp_path / "data" / "agent-memory.sqlite3")
+        msg_alice = memory.archive_message(
+            account_id="bot",
+            conversation_id="room@chatroom",
+            sender_id="wxid_alice",
+            raw_envelope={"msg": "我每周五晚上打羽毛球"},
+            source_record={"msg": "我每周五晚上打羽毛球"},
+            body_text="我每周五晚上打羽毛球",
+        )
+        msg_bob = memory.archive_message(
+            account_id="bot",
+            conversation_id="room@chatroom",
+            sender_id="wxid_bob",
+            raw_envelope={"msg": "我也报个名"},
+            source_record={"msg": "我也报个名"},
+            body_text="我也报个名",
+        )
+        msg_charlie = memory.archive_message(
+            account_id="bot",
+            conversation_id="room@chatroom",
+            sender_id="wxid_charlie",
+            raw_envelope={"msg": "收到"},
+            source_record={"msg": "收到"},
+            body_text="收到",
+        )
+
+        refs = memory.short_refs_map(
+            account_id="bot",
+            items=[
+                ("message", msg_alice.message_id),
+                ("message", msg_bob.message_id),
+                ("user", "wxid_alice"),
+                ("user", "wxid_bob"),
+                ("user", "wxid_charlie"),
+                ("chat", "room@chatroom"),
+            ],
+        )
+        m1 = refs[("message", msg_alice.message_id)]
+        u_alice = refs[("user", "wxid_alice")]
+        u_bob = refs[("user", "wxid_bob")]
+        u_charlie = refs[("user", "wxid_charlie")]
+        g_room = refs[("chat", "room@chatroom")]
+
+        window = ContextWindow(
+            account_id="bot",
+            conversation_id="room@chatroom",
+            is_group=True,
+            turns=(
+                ContextTurn("wxid_alice", "hook_group_member_wxid", "我每周五晚上打羽毛球", message_id=msg_alice.message_id),
+                ContextTurn("wxid_bob", "hook_group_member_wxid", "我也报个名", message_id=msg_bob.message_id),
+                ContextTurn("wxid_charlie", "hook_group_member_wxid", "收到", message_id=msg_charlie.message_id),
+            ),
+            identities={
+                "wxid_alice": ContactIdentity(display_name="小明", user_name="wxid_alice", nickname="小明"),
+                "wxid_bob": ContactIdentity(display_name="小明", user_name="wxid_bob", nickname="小明"),
+                "wxid_charlie": ContactIdentity(display_name="老陈", user_name="wxid_charlie", remark="老陈"),
+            },
+        )
+        # Attach short_refs dynamically (Phase 2 ContextWindow field)
+        object.__setattr__(window, "short_refs", refs)
+        ctx_dict = tool_memory_context(window)
+        by_sid = {row["sender_id"]: row for row in ctx_dict["sender_choices"]}
+        assert by_sid["wxid_alice"]["short_ref"] == u_alice
+        assert by_sid["wxid_bob"]["short_ref"] == u_bob
+        assert by_sid["wxid_charlie"]["short_ref"] == u_charlie
+
+        tools = WeChatTools(
+            tmp_path, "bot", "room@chatroom", None, None, None,
+            SystemClock(), memory_store=memory,
+        )
+        token = memory_context.set(ctx_dict)
+        op_token = operation_id.set("phase2-short-ref-ops")
+        try:
+            # 1) remember_user_fact with lowercase M# & invalid/wrong-kind rejection
+            bad_fact = await tools.remember_user_fact("sport", "无效", source_message_id="M999")
+            assert bad_fact == {"status": "rejected", "reason": "source_message_unavailable"}
+            wrong_kind_fact = await tools.remember_user_fact("sport", "错类型", source_message_id=u_alice)
+            assert wrong_kind_fact == {"status": "rejected", "reason": "source_message_unavailable"}
+            saved_fact = await tools.remember_user_fact(
+                "sport", "周五晚上打羽毛球", source_message_id=m1.lower(),
+            )
+            assert saved_fact["status"] == "saved"
+            assert saved_fact["source_message_id"] == msg_alice.message_id
+
+            found_facts = await tools.search_user_memory("羽毛球")
+            assert len(found_facts["memories"]) == 1
+            assert found_facts["memories"][0]["source_message_id"] == msg_alice.message_id
+            assert found_facts["memories"][0]["source_message_ref"] == m1
+
+            # 2) add_message_notes with M# and G# -> returns note_ref; search_message_notes enriches refs
+            note_res = await tools.add_message_notes([
+                {"message_id": m1.lower(), "conversation_id": g_room.lower(), "content": "羽毛球固定约局"},
+                {"message_id": "M999", "content": "不存在"},
+                {"message_id": m1, "conversation_id": "G999", "content": "无效会话"},
+            ])
+            assert [r["status"] for r in note_res["results"]] == ["saved", "unavailable", "unavailable"]
+            saved_note = note_res["results"][0]
+            assert saved_note["message_id"] == msg_alice.message_id
+            assert saved_note["note_ref"].startswith("N")
+
+            searched_notes = await tools.search_message_notes("固定约局")
+            assert len(searched_notes["notes"]) == 1
+            assert searched_notes["notes"][0]["short_ref"] == saved_note["note_ref"]
+            assert searched_notes["notes"][0]["message_ref"] == m1
+
+            # 3) Entity delete by lowercase D#
+            ent = await tools.upsert_entity_dictionary_batch([
+                {"term": "羽球局", "explanation": "周五晚固定羽毛球活动"},
+            ])
+            ent_id = ent["results"][0]["entity_id"]
+            d_ref = memory.short_refs_map(account_id="bot", items=[("entity", ent_id)])[("entity", ent_id)]
+            assert (await tools.delete_entity_dictionary_entry("D999"))["status"] == "rejected"
+            assert (await tools.delete_entity_dictionary_entry(d_ref.lower()))["status"] == "deleted"
+
+            # 4) Sender memory: U#, unique name, ambiguous name (returns short_ref), and P# delete
+            amb_sender = tools._update_sender_from_entry(
+                {"sender": "小明", "type": "偏好", "content": "喜欢打球"},
+                ctx_dict["sender_choices"],
+            )
+            assert amb_sender["status"] == "ambiguous"
+            assert {c["short_ref"] for c in amb_sender["choices"]} == {u_alice, u_bob}
+
+            saved_mem = tools.upsert_sender_memory(u_alice.lower(), "偏好", "周五打羽毛球")
+            assert saved_mem["status"] == "saved"
+            mem_id = str(saved_mem["memory_id"])
+            p_ref = memory.short_refs_map(account_id="bot", items=[("memory", mem_id)])[("memory", mem_id)]
+            assert tools.delete_sender_memory("P999")["status"] == "unavailable"
+            assert tools.delete_sender_memory(p_ref.lower())["status"] == "deleted"
+
+            # 5) tag_updates: U#, raw sender_id, unique name via sender/name, and ambiguous disambiguation
+            tag_res = tools.memory_tools.apply_tag_updates([
+                {"sender_id": u_alice.lower(), "tags": ["球友"]},
+                {"sender": "老陈", "tags": ["热心"]},
+                {"name": "小明", "tags": ["重名测试"]},
+                {"sender_id": "U999", "tags": ["不存在"]},
+            ])
+            assert tag_res[0]["status"] == "updated" and tag_res[0]["sender_id"] == "wxid_alice"
+            assert tag_res[1]["status"] == "updated" and tag_res[1]["sender_id"] == "wxid_charlie"
+            assert tag_res[2]["status"] == "ambiguous"
+            assert tag_res[2]["reason"] == "sender_name_matches_multiple_people_use_sender_id"
+            assert {c["short_ref"] for c in tag_res[2]["choices"]} == {u_alice, u_bob}
+            assert tag_res[3]["status"] == "unavailable"
+        finally:
+            operation_id.reset(op_token)
+            memory_context.reset(token)
+            tools.db.close()
+            memory.close()
+
+    asyncio.run(scenario())
+
+
+def test_phase2_media_and_reply_tools_resolve_image_and_file_short_refs(tmp_path: Path):
+    async def scenario():
+        (tmp_path / "data").mkdir()
+        memory = MemoryStore(tmp_path / "data" / "agent-memory.sqlite3")
+
+        # Create archived image
+        img_msg = memory.archive_message(
+            account_id="bot", conversation_id="room@chatroom", sender_id="wxid_alice",
+            raw_envelope={"msg": "img"}, source_record={"msg": "img"}, body_text="img",
+        )
+        img_row = memory.begin_image_ingest(
+            account_id="bot", conversation_id="room@chatroom",
+            message_id=img_msg.message_id, original_references=[],
+        )
+        img_id = str(img_row["image_id"])
+        img_buf = io.BytesIO()
+        Image.new("RGB", (16, 16), (30, 120, 200)).save(img_buf, format="PNG")
+        img_bytes = img_buf.getvalue()
+        img_path = memory.media_root / f"{img_id}.png"
+        img_path.parent.mkdir(parents=True, exist_ok=True)
+        img_path.write_bytes(img_bytes)
+        img_sha = hashlib.sha256(img_bytes).hexdigest()
+        memory.complete_image_ingest(
+            image_id=img_id, account_id="bot", artifact_path=str(img_path.resolve()),
+            mime_type="image/png", byte_count=len(img_bytes), sha256=img_sha, source_sha256=img_sha,
+        )
+        i_ref = memory.short_refs_map(account_id="bot", items=[("image", img_id)])[("image", img_id)]
+
+        # Create archived text file
+        file_msg = memory.archive_message(
+            account_id="bot", conversation_id="room@chatroom", sender_id="wxid_alice",
+            raw_envelope={"msg": "file"}, source_record={"msg": "file"}, body_text="file",
+        )
+        file_row = memory.begin_file_ingest(
+            account_id="bot", conversation_id="room@chatroom",
+            message_id=file_msg.message_id, original_references=[],
+            filename="readme.txt", fileext="txt",
+        )
+        file_id = str(file_row["file_id"])
+        file_bytes = b"line-one\nline-two\n"
+        file_path = memory.file_root / f"{file_id}.txt"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(file_bytes)
+        memory.complete_file_ingest(
+            file_id=file_id, account_id="bot", artifact_path=str(file_path.resolve()),
+            mime_type="text/plain", byte_count=len(file_bytes),
+            sha256=hashlib.sha256(file_bytes).hexdigest(),
+        )
+        f_ref = memory.short_refs_map(account_id="bot", items=[("file", file_id)])[("file", file_id)]
+        m_file_ref = memory.short_refs_map(
+            account_id="bot", items=[("message", file_msg.message_id)],
+        )[("message", file_msg.message_id)]
+
+        sent_images: list[Path] = []
+
+        class Gateway:
+            def send_image(self, room, path):
+                sent_images.append(Path(path))
+                return "queued", "hook_queued_not_delivery_proof"
+
+        tools = WeChatTools(
+            tmp_path, "bot", "room@chatroom", None, None, None,
+            SystemClock(), memory_store=memory, gateway=Gateway(),
+        )
+        ctx_token = memory_context.set({
+            "account_id": "bot",
+            "conversation_id": "room@chatroom",
+            "message_id": file_msg.message_id,
+            "current_message_ids": (file_msg.message_id,),
+            "allowed_conversations": ("room@chatroom",),
+        })
+        try:
+            # list_wechat_images exposes short_ref
+            listed = tools.list_wechat_images()
+            assert listed["images"][0]["image_id"] == img_id
+            assert listed["images"][0]["short_ref"] == i_ref
+
+            # manage_wechat_image_library resolves I#
+            managed = tools.manage_wechat_image_library(i_ref.lower(), description="蓝色方块", quick_send=True)
+            assert managed["status"] == "updated"
+            assert tools.manage_wechat_image_library("I999", quick_send=True)["status"] == "unavailable"
+
+            # apply_image_notes resolves I#
+            note_res = tools.memory_tools.apply_image_notes([
+                {"image_id": i_ref.lower(), "content": "一张蓝色方块测试图"},
+                {"image_id": "I999", "content": "无效短编号"},
+            ])
+            assert note_res[0]["status"] == "saved" and note_res[0]["image_id"] == img_id
+            assert note_res[1]["status"] == "unavailable"
+
+            # read_wechat_image resolves I# (returns cached vision_summary) and preserves "latest"
+            read_by_ref = await tools.read_wechat_image(i_ref.lower(), "图里是什么")
+            assert read_by_ref["image_id"] == img_id
+            assert read_by_ref["description"] == "一张蓝色方块测试图"
+            assert read_by_ref["cached"] is True
+            read_latest = await tools.read_wechat_image("latest", "图里是什么")
+            assert read_latest["image_id"] == img_id
+            assert (await tools.read_wechat_image("I999", "图里是什么"))["error"] == "saved_image_not_found"
+
+            # _image, send_wechat_image, and commit_agent_turn(reply_image_id) resolve I#
+            assert tools._image(i_ref.lower()) == img_path.resolve()
+            op1 = operation_id.set("send-img-by-short-ref")
+            try:
+                sent_direct = await tools.send_wechat_image(i_ref.lower())
+                assert sent_direct["status"] == "queued"
+            finally:
+                operation_id.reset(op1)
+
+            op2 = operation_id.set("commit-img-by-short-ref")
+            try:
+                committed = await tools.commit_agent_turn(reply_image_id=i_ref.lower())
+                assert committed["reply_image"]["status"] == "queued"
+            finally:
+                operation_id.reset(op2)
+
+            op3 = operation_id.set("commit-img-invalid-ref")
+            try:
+                bad_commit = await tools.commit_agent_turn(reply_image_id="I999")
+                assert bad_commit["reply_image"]["status"] == "rejected"
+            finally:
+                operation_id.reset(op3)
+
+            assert len(sent_images) == 2
+
+            # read_wechat_file resolves F#, raw file_id, M#, and preserves "latest"
+            by_f = await tools.read_wechat_file(f_ref.lower())
+            assert by_f["file_id"] == file_id and "line-one" in str(by_f["content"])
+            by_raw = await tools.read_wechat_file(file_id)
+            assert by_raw["file_id"] == file_id
+            by_m = await tools.read_wechat_file(m_file_ref.lower())
+            assert by_m["file_id"] == file_id
+            by_latest = await tools.read_wechat_file("latest")
+            assert by_latest["file_id"] == file_id
+            missing_file = await tools.read_wechat_file("F999")
+            assert missing_file["error"] == "file_not_found"
+        finally:
+            memory_context.reset(ctx_token)
+            tools.db.close()
+            memory.close()
+
+    asyncio.run(scenario())

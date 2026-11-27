@@ -689,3 +689,118 @@ def test_dashboard_static_js_syntax_and_csp():
             assert proc.returncode == 0, f"{script_name} syntax check failed: {proc.stderr}"
 
 
+def test_phase2_dashboard_short_refs_and_transcript_short_message_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(tool_policy, "POLICY_PATH", tmp_path / "controls.sqlite3")
+    memory_db = tmp_path / "agent-memory.sqlite3"
+    store = MemoryStore(memory_db)
+    event_book = EventBook(store)
+
+    dm_msg = store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="wxid_alice",
+        sender_id="wxid_alice",
+        raw_envelope={"msglist": [{"msgsvrid": 5001}]},
+        body_text="我对花生过敏",
+    )
+    store.archive_message(
+        account_id="wxid_bot",
+        conversation_id="88888@chatroom",
+        sender_id="wxid_alice",
+        raw_envelope={"msglist": [{"msgsvrid": 5002}]},
+        body_text="群里同步一下进度",
+    )
+    store.upsert_sender_memory(
+        account_id="wxid_bot",
+        sender_id="wxid_alice",
+        topic="偏好",
+        content="喜欢黑咖啡",
+    )
+    store.remember_fact(
+        account_id="wxid_bot",
+        fact_key="peanut_allergy",
+        content="Alice 对花生过敏",
+        source_message_id=dm_msg.message_id,
+    )
+    store.add_note(
+        account_id="wxid_bot",
+        message_id=dm_msg.message_id,
+        content="重要过敏信息",
+    )
+    store.upsert_entity(
+        account_id="wxid_bot",
+        term="EchoLoom",
+        explanation="本地微信 AI 助手项目",
+    )
+    event_book.add(
+        account_id="wxid_bot",
+        priority="high",
+        content="周五交周报",
+        exit_condition="交完后删除",
+    )
+    store.close()
+
+    app = create_trace_dashboard(
+        tmp_path,
+        gateway=_StubGateway({}),
+        memory_db_path=memory_db,
+    )
+    with TestClient(app, base_url="http://127.0.0.1:8767") as client:
+        overview = client.get("/api/overview").json()
+        assert overview["short_refs"]["wxid_alice"].startswith("U")
+        assert overview["short_refs"]["88888@chatroom"].startswith("G")
+
+        summary = client.get("/api/memory/summary", params={"account_id": "wxid_bot"}).json()
+        assert summary["short_refs"]["wxid_alice"] == overview["short_refs"]["wxid_alice"]
+        assert summary["short_refs"]["88888@chatroom"] == overview["short_refs"]["88888@chatroom"]
+
+        senders = client.get("/api/senders").json()["senders"]
+        alice = next(item for item in senders if item["sender_id"] == "wxid_alice")
+        group = next(item for item in senders if item["sender_id"] == "88888@chatroom")
+        assert alice["short_ref"].startswith("U")
+        assert group["short_ref"].startswith("G")
+        assert alice["memories"][0]["short_ref"].startswith("P")
+
+        facts = client.get("/api/memory/facts", params={"account_id": "wxid_bot"}).json()["facts"]
+        assert facts[0]["source"]["source_short_ref"].startswith("M")
+
+        events = client.get("/api/memory/events", params={"account_id": "wxid_bot"}).json()["events"]
+        assert events[0]["short_ref"].startswith("E")
+
+        entities = client.get("/api/memory/entities", params={"account_id": "wxid_bot"}).json()["entities"]
+        assert entities[0]["short_ref"].startswith("D")
+
+        notes = client.get("/api/memory/annotations", params={"account_id": "wxid_bot"}).json()["annotations"]
+        assert notes[0]["short_ref"].startswith("N")
+        assert notes[0]["source_message"]["short_ref"].startswith("M")
+
+        recents = client.get("/api/memory/recent-messages", params={"account_id": "wxid_bot"}).json()["messages"]
+        assert all(msg["short_ref"].startswith("M") for msg in recents)
+
+    # Confirm _transcript handles both compact M# and legacy 32-char hex message IDs.
+    transcript_rows = [
+        {
+            "session_id": "s2",
+            "conversation_id": "wxid_alice",
+            "author": "user",
+            "timestamp": 10,
+            "content": [
+                {
+                    "text": (
+                        "本轮聊天记录：\n"
+                        "[消息ID：M42；2026-11-27 21:30\n"
+                        "主人（Alice）：*{新短引用消息}*]\n"
+                        "[消息ID：0123456789abcdef0123456789abcdef；2026-11-27 21:31\n"
+                        "wxid_alice | 主人（Alice）：*{旧32位十六进制ID消息}*]"
+                    )
+                }
+            ],
+        }
+    ]
+    entries = _transcript(transcript_rows)
+    assert entries[0]["messages"] == [
+        {"sender": "主人（Alice）", "text": "新短引用消息"},
+        {"sender": "wxid_alice | 主人（Alice）", "text": "旧32位十六进制ID消息"},
+    ]
+
+
+

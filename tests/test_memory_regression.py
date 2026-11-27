@@ -278,9 +278,11 @@ def test_idle_consolidation_diagnostics_detect_bloated_senders_and_excess_facts(
         builder.build(ContextSpec.for_idle(account_id="wxid_bot001", event_id="idle_bloat_1"))
     )
     task_text = built_bloated.context.turns[0].text
+    chatty_ref = built_bloated.context.short_refs[("user", "wxid_chatty")]
+    assert chatty_ref.startswith("U")
     assert "新增真人消息：0 条" in task_text
     assert "碎片合并预警：" in task_text
-    assert "wxid_chatty" in task_text
+    assert f"话痨群友({chatty_ref}) 8 条" in task_text
     assert "账号事实≥20条（当前 20 条" in task_text
     assert "fact_item_00" in task_text
     assert "存在长期记忆碎片堆积（禁止零工具直接跳过）" in task_text

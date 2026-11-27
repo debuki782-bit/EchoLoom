@@ -36,6 +36,7 @@ from .repos.schema import (
     init_memory_schema,
     migrate_sender_memories_to_multi_entry,
 )
+from .repos.short_ref_repo import SHORT_REF_PREFIXES, ShortRefRepo, identity_ref_kind
 
 __all__ = [
     "DEFAULT_RETENTION_DAYS",
@@ -45,13 +46,16 @@ __all__ = [
     "MAX_NOTE_CHARS",
     "MAX_QUERY_CHARS",
     "MAX_SENDER_MEMORY_CHARS",
+    "SHORT_REF_PREFIXES",
     "MemoryStore",
+    "ShortRefRepo",
     "StoredMessage",
     "_bounded_text",
     "_gap_minutes",
     "_like_escape",
     "_now",
     "_source_platform_message_id",
+    "identity_ref_kind",
 ]
 
 
@@ -81,12 +85,19 @@ class MemoryStore:
         self.db.execute("PRAGMA journal_mode=WAL")
         init_memory_schema(self.db, self._lock, self.transaction)
 
-        self.knowledge = KnowledgeRepo(self.db, self._lock, self.transaction)
+        self.short_refs = ShortRefRepo(self.db, self._lock, self.transaction)
+        self.knowledge = KnowledgeRepo(
+            self.db,
+            self._lock,
+            self.transaction,
+            short_refs=self.short_refs,
+        )
         self.messages = MessageRepo(
             self.db,
             self._lock,
             self.transaction,
             ensure_note=self.knowledge.ensure_note,
+            short_refs=self.short_refs,
         )
         self.media = MediaRepo(
             self.db,
@@ -97,6 +108,7 @@ class MemoryStore:
             file_root=self._file_root,
             messages=self.messages,
             knowledge=self.knowledge,
+            short_refs=self.short_refs,
         )
 
     @property
@@ -1139,6 +1151,38 @@ class MemoryStore:
             file_id=file_id,
             summary=summary,
             model_id=model_id,
+        )
+
+    # ------------------------------------------------------------------
+    # ShortRefRepo delegates
+    # ------------------------------------------------------------------
+
+    identity_ref_kind = staticmethod(identity_ref_kind)
+
+    def ensure_short_ref(self, *, account_id: str, kind: str, target_id: str) -> str:
+        return self.short_refs.ensure_short_ref(
+            account_id=account_id, kind=kind, target_id=target_id
+        )
+
+    def ensure_short_refs_batch(
+        self, *, account_id: str, items: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], str]:
+        return self.short_refs.ensure_short_refs_batch(account_id=account_id, items=items)
+
+    def short_refs_map(
+        self, *, account_id: str, items: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], str]:
+        return self.short_refs.short_refs_map(account_id=account_id, items=items)
+
+    def resolve_short_ref(
+        self,
+        *,
+        account_id: str,
+        value: str,
+        kinds: Sequence[str] | None = None,
+    ) -> str | None:
+        return self.short_refs.resolve_short_ref(
+            account_id=account_id, value=value, kinds=kinds
         )
 
     def close(self) -> None:

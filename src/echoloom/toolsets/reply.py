@@ -67,12 +67,19 @@ class ReplyToolset:
                 "reason": "image_resolver_not_configured",
                 "delivered": False,
             }
+        resolved_id = self.memory_tools._resolve_ref(image_id, ("image",))
+        if not resolved_id:
+            return {
+                "status": "rejected",
+                "reason": "unknown image_id; use list_wechat_images",
+                "delivered": False,
+            }
         try:
-            path = self._resolve_image(image_id)
+            path = self._resolve_image(resolved_id)
         except Exception as exc:  # noqa: BLE001
             return {"status": "rejected", "reason": str(exc), "delivered": False}
         return await self.outbound.send_commit_image(
-            image_id,
+            resolved_id,
             path,
             segment_index=segment_index,
             note=note,
